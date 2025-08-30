@@ -1,4 +1,6 @@
 import 'reflect-metadata';
+import { config } from 'dotenv';
+config(); 
 import { DataSource } from 'typeorm';
 import { Organization } from './entities/Organization';
 import { User } from './entities/User';
@@ -18,6 +20,12 @@ import { CollaborationSession } from './entities/CollaborationSession';
 import { AgentMetric } from './entities/AgentMetric';
 import { ApprovalRequest } from './entities/ApprovalRequest';
 import { ApprovalResponse } from './entities/ApprovalResponse';
+import { AutomationExecution } from './entities/AutomationExecution';
+import { AutomationRule } from './entities/AutomationRule';
+import { RepositoryIntegration } from './entities/RepositoryIntegration';
+import { WebhookEvent } from './entities/WebhookEvent';
+
+
 
 export const AppDataSource = new DataSource({
   type: 'postgres',
@@ -38,6 +46,7 @@ export const AppDataSource = new DataSource({
     Project,
     Task,
     TaskExecution,
+    WebhookEvent,
     Workflow,
     WorkflowExecution,
     Template,
@@ -47,6 +56,9 @@ export const AppDataSource = new DataSource({
     AgentMetric,
     ApprovalRequest,
     ApprovalResponse,
+    AutomationExecution,
+    AutomationRule,
+    RepositoryIntegration,
   ],
   migrations: ['src/database/migrations/*.ts'],
   subscribers: ['src/database/subscribers/*.ts'],
