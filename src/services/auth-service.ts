@@ -25,7 +25,7 @@ export interface Role {
   name: string;
   description: string;
   permissions: Permission[];
-  isSystem: boolean; // System roles cannot be deleted
+  isSystem: boolean; 
   createdAt: Date;
   updatedAt: Date;
 }
@@ -243,7 +243,7 @@ export class AuthService extends EventEmitter {
     if (!adminExists) {
       // Create default admin user
       await this.createUser({
-        email: 'admin@orchestrator.local',
+        email: 'admin@Loomiq.local',
         username: 'admin',
         password: 'admin123', // Should be changed on first login
         firstName: 'System',
