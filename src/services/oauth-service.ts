@@ -265,5 +265,265 @@ export class OAuth2Service extends EventEmitter {
     }
   }
 
+  async generateAuthorizationUrl(
+    providerId: string,
+    state?: string,
+    nonce?: string,
+    additionalParams?: Record<string, string>
+  ): Promise<{
+    url: string;
+    state: string;
+    nonce?: string;
+    codeVerifier?: string;
+  }> {
+    const config = this.configs.get(providerId);
+    if (!config) {
+      throw new Error('OAuth2 provider not found');
+    }
 
+    // Generate state and nonce if not provided
+    const generatedState = state || crypto.randomBytes(32).toString('hex');
+    const generatedNonce = nonce || crypto.randomBytes(32).toString('hex');
+
+    // Generate PKCE code verifier and challenge for security
+    const codeVerifier = crypto.randomBytes(32).toString('base64url');
+    const codeChallenge = crypto
+      .createHash('sha256')
+      .update(codeVerifier)
+      .digest('base64url');
+
+    const params = new URLSearchParams({
+      response_type: 'code',
+      client_id: config.clientId,
+      redirect_uri: config.redirectUri,
+      scope: config.scopes.join(' '),
+      state: generatedState,
+      code_challenge: codeChallenge,
+      code_challenge_method: 'S256'
+    });
+
+    // Add nonce for OIDC
+    if (this.isOIDCConfig(config)) {
+      params.append('nonce', generatedNonce);
+    }
+
+    // Add additional parameters
+    if (config.additionalParams) {
+      Object.entries(config.additionalParams).forEach(([key, value]) => {
+        params.append(key, value);
+      });
+    }
+
+    if (additionalParams) {
+      Object.entries(additionalParams).forEach(([key, value]) => {
+        params.append(key, value);
+      });
+    }
+
+    const authUrl = `${config.authorizationUrl}?${params.toString()}`;
+
+    this.logger.info('Authorization URL generated', {
+      providerId,
+      state: generatedState,
+      hasNonce: !!generatedNonce
+    });
+
+    return {
+      url: authUrl,
+      state: generatedState,
+      nonce: generatedNonce,
+      codeVerifier
+    };
+  }
+
+  async exchangeCodeForTokens(
+    providerId: string,
+    code: string,
+    state: string,
+    codeVerifier?: string
+  ): Promise<OAuth2AuthResult> {
+    const config = this.configs.get(providerId);
+    if (!config) {
+      throw new Error('OAuth2 provider not found');
+    }
+
+    const httpClient = this.httpClients.get(providerId);
+    if (!httpClient) {
+      throw new Error('HTTP client not configured');
+    }
+
+    try {
+      // Exchange authorization code for tokens
+      const tokenParams = new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: config.clientId,
+        client_secret: config.clientSecret,
+        code,
+        redirect_uri: config.redirectUri
+      });
+
+      if (codeVerifier) {
+        tokenParams.append('code_verifier', codeVerifier);
+      }
+
+      const tokenResponse = await httpClient.post(config.tokenUrl, tokenParams, {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        }
+      });
+
+      const tokens = tokenResponse.data;
+
+      // Validate ID token if present (OIDC)
+      let idTokenPayload;
+      if (tokens.id_token && this.isOIDCConfig(config)) {
+        const tokenInfo = await this.validateIdToken(providerId, tokens.id_token);
+        if (!tokenInfo.valid) {
+          throw new Error(`Invalid ID token: ${tokenInfo.error}`);
+        }
+        idTokenPayload = tokenInfo.payload;
+      }
+
+      // Get user information
+      const user = await this.getUserInfo(providerId, tokens.access_token, idTokenPayload);
+
+      const result: OAuth2AuthResult = {
+        success: true,
+        user,
+        tokens: {
+          accessToken: tokens.access_token,
+          refreshToken: tokens.refresh_token,
+          idToken: tokens.id_token,
+          expiresIn: tokens.expires_in,
+          tokenType: tokens.token_type || 'Bearer'
+        },
+        state
+      };
+
+      this.logger.info('OAuth2 token exchange successful', {
+        providerId,
+        userId: user.id,
+        email: user.email
+      });
+
+      this.emit('authentication:success', {
+        providerId,
+        user,
+        tokens: result.tokens
+      });
+
+      return result;
+
+    } catch (error) {
+      this.logger.error('OAuth2 token exchange failed:', error);
+
+      const result: OAuth2AuthResult = {
+        success: false,
+        error: error instanceof Error ? error.message : 'Token exchange failed',
+        state
+      };
+
+      this.emit('authentication:failure', {
+        providerId,
+        error: result.error
+      });
+
+      return result;
+    }
+  }
+
+  private async getUserInfo(
+    providerId: string,
+    accessToken: string,
+    idTokenPayload?: any
+  ): Promise<NonNullable<OAuth2AuthResult['user']>> {
+    const config = this.configs.get(providerId);
+    if (!config) {
+      throw new Error('OAuth2 provider not found');
+    }
+
+    // If we have ID token payload, extract user info from it first
+    if (idTokenPayload) {
+      return this.extractUserFromIdToken(idTokenPayload);
+    }
+
+    // Fetch user info from userinfo endpoint
+    if (!config.userInfoUrl) {
+      throw new Error('User info URL not configured');
+    }
+
+    const httpClient = this.httpClients.get(providerId);
+    if (!httpClient) {
+      throw new Error('HTTP client not configured');
+    }
+
+    try {
+      const response = await httpClient.get(config.userInfoUrl, {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`
+        }
+      });
+
+      return this.extractUserFromUserInfo(response.data, config.provider);
+
+    } catch (error) {
+      this.logger.error('Failed to fetch user info:', error);
+      throw new Error('Failed to fetch user information');
+    }
+  }
+
+  private extractUserFromIdToken(payload: any): NonNullable<OAuth2AuthResult['user']> {
+    return {
+      id: payload.sub,
+      email: payload.email,
+      name: payload.name,
+      firstName: payload.given_name,
+      lastName: payload.family_name,
+      picture: payload.picture,
+      verified: payload.email_verified,
+      attributes: payload
+    };
+  }
+
+  private extractUserFromUserInfo(
+    userInfo: any,
+    provider: OAuth2Config['provider']
+  ): NonNullable<OAuth2AuthResult['user']> {
+    switch (provider) {
+      case 'google':
+        return {
+          id: userInfo.id,
+          email: userInfo.email,
+          name: userInfo.name,
+          firstName: userInfo.given_name,
+          lastName: userInfo.family_name,
+          picture: userInfo.picture,
+          verified: userInfo.verified_email,
+          attributes: userInfo
+        };
+
+      case 'microsoft':
+        return {
+          id: userInfo.id,
+          email: userInfo.mail || userInfo.userPrincipalName,
+          name: userInfo.displayName,
+          firstName: userInfo.givenName,
+          lastName: userInfo.surname,
+          attributes: userInfo
+        };
+
+      default:
+        // Generic extraction
+        return {
+          id: userInfo.id || userInfo.sub,
+          email: userInfo.email,
+          name: userInfo.name || userInfo.display_name,
+          firstName: userInfo.given_name || userInfo.first_name,
+          lastName: userInfo.family_name || userInfo.last_name,
+          picture: userInfo.picture || userInfo.avatar_url,
+          verified: userInfo.email_verified,
+          attributes: userInfo
+        };
+    }
+  }
 };
