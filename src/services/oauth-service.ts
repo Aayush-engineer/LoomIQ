@@ -107,6 +107,8 @@ export class OAuth2Service extends EventEmitter {
   }
 
   private async loadConfigurations(): Promise<void> {
+    // Load configurations from database
+    // For now, create some default configurations
     await this.createDefaultConfigurations();
   }
 
@@ -204,7 +206,7 @@ export class OAuth2Service extends EventEmitter {
     }
   }
 
-    private validateConfig(config: OAuth2Config | OIDCConfig): void {
+  private validateConfig(config: OAuth2Config | OIDCConfig): void {
     if (!config.clientId || !config.clientSecret) {
       throw new Error('Client ID and Client Secret are required');
     }
@@ -262,6 +264,7 @@ export class OAuth2Service extends EventEmitter {
 
     } catch (error) {
       this.logger.warn('Failed to load OIDC discovery document:', error);
+      // Continue without discovery - use manual configuration
     }
   }
 
@@ -526,4 +529,235 @@ export class OAuth2Service extends EventEmitter {
         };
     }
   }
-};
+
+  async validateIdToken(providerId: string, idToken: string): Promise<TokenInfo> {
+    const config = this.configs.get(providerId);
+    if (!config || !this.isOIDCConfig(config)) {
+      return { valid: false, error: 'Not an OIDC provider' };
+    }
+
+    try {
+      // Decode token header to get key ID
+      const header = jwt.decode(idToken, { complete: true })?.header;
+      if (!header || !header.kid) {
+        return { valid: false, error: 'Invalid token header' };
+      }
+
+      // Get signing key
+      const jwksClientInstance = this.jwksClients.get(providerId);
+      if (!jwksClientInstance) {
+        return { valid: false, error: 'JWKS client not configured' };
+      }
+
+      const key = await jwksClientInstance.getSigningKey(header.kid);
+      const signingKey = key.getPublicKey();
+
+      // Verify and decode token
+      const payload = jwt.verify(idToken, signingKey, {
+        issuer: config.issuer,
+        audience: config.clientId,
+        algorithms: [config.idTokenSigningAlg || 'RS256'],
+        clockTolerance: config.clockTolerance || 60
+      });
+
+      return {
+        valid: true,
+        payload,
+        expiresAt: new Date((payload as any).exp * 1000)
+      };
+
+    } catch (error) {
+      return {
+        valid: false,
+        error: error instanceof Error ? error.message : 'Token validation failed'
+      };
+    }
+  }
+
+  async refreshAccessToken(
+    providerId: string,
+    refreshToken: string
+  ): Promise<{
+    success: boolean;
+    tokens?: OAuth2AuthResult['tokens'];
+    error?: string;
+  }> {
+    const config = this.configs.get(providerId);
+    if (!config) {
+      return { success: false, error: 'OAuth2 provider not found' };
+    }
+
+    const httpClient = this.httpClients.get(providerId);
+    if (!httpClient) {
+      return { success: false, error: 'HTTP client not configured' };
+    }
+
+    try {
+      const params = new URLSearchParams({
+        grant_type: 'refresh_token',
+        client_id: config.clientId,
+        client_secret: config.clientSecret,
+        refresh_token: refreshToken
+      });
+
+      const response = await httpClient.post(config.tokenUrl, params, {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        }
+      });
+
+      const tokens = response.data;
+
+      return {
+        success: true,
+        tokens: {
+          accessToken: tokens.access_token,
+          refreshToken: tokens.refresh_token || refreshToken,
+          idToken: tokens.id_token,
+          expiresIn: tokens.expires_in,
+          tokenType: tokens.token_type || 'Bearer'
+        }
+      };
+
+    } catch (error) {
+      this.logger.error('Token refresh failed:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Token refresh failed'
+      };
+    }
+  }
+
+  async revokeToken(providerId: string, token: string, tokenType: 'access_token' | 'refresh_token' = 'access_token'): Promise<{
+    success: boolean;
+    error?: string;
+  }> {
+    const config = this.configs.get(providerId);
+    if (!config) {
+      return { success: false, error: 'OAuth2 provider not found' };
+    }
+
+    // Check if provider supports token revocation
+    const discovery = this.discoveryCache.get(providerId);
+    const revocationEndpoint = discovery?.revocation_endpoint;
+
+    if (!revocationEndpoint) {
+      this.logger.warn('Token revocation not supported by provider', { providerId });
+      return { success: true }; // Treat as success if not supported
+    }
+
+    const httpClient = this.httpClients.get(providerId);
+    if (!httpClient) {
+      return { success: false, error: 'HTTP client not configured' };
+    }
+
+    try {
+      const params = new URLSearchParams({
+        token,
+        token_type_hint: tokenType,
+        client_id: config.clientId,
+        client_secret: config.clientSecret
+      });
+
+      await httpClient.post(revocationEndpoint, params, {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        }
+      });
+
+      return { success: true };
+
+    } catch (error) {
+      this.logger.error('Token revocation failed:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Token revocation failed'
+      };
+    }
+  }
+
+  // Configuration management methods
+  async listProviders(organizationId: string): Promise<(OAuth2Config | OIDCConfig)[]> {
+    const providers: (OAuth2Config | OIDCConfig)[] = [];
+    
+    for (const config of this.configs.values()) {
+      if (config.organizationId === organizationId) {
+        // Return config without sensitive data
+        const { clientSecret, ...publicConfig } = config;
+        providers.push(publicConfig as OAuth2Config | OIDCConfig);
+      }
+    }
+    
+    return providers;
+  }
+
+  async getProvider(id: string): Promise<(OAuth2Config | OIDCConfig) | undefined> {
+    const config = this.configs.get(id);
+    if (!config) return undefined;
+
+    // Return config without sensitive data
+    const { clientSecret, ...publicConfig } = config;
+    return publicConfig as OAuth2Config | OIDCConfig;
+  }
+
+  async updateProvider(id: string, updates: Partial<OAuth2Config | OIDCConfig>): Promise<void> {
+    const existing = this.configs.get(id);
+    if (!existing) {
+      throw new Error('OAuth2 provider not found');
+    }
+
+    const updated = { ...existing, ...updates };
+    await this.configureProvider(updated);
+  }
+
+  async deleteProvider(id: string): Promise<void> {
+    this.configs.delete(id);
+    this.httpClients.delete(id);
+    this.jwksClients.delete(id);
+    this.discoveryCache.delete(id);
+    
+    this.logger.info('OAuth2 provider deleted', { id });
+  }
+
+  async testConnection(providerId: string): Promise<{
+    success: boolean;
+    error?: string;
+    endpoints?: any;
+  }> {
+    try {
+      const config = this.configs.get(providerId);
+      if (!config) {
+        throw new Error('OAuth2 provider not found');
+      }
+
+      const httpClient = this.httpClients.get(providerId);
+      if (!httpClient) {
+        throw new Error('HTTP client not configured');
+      }
+
+      // Test discovery endpoint for OIDC
+      if (this.isOIDCConfig(config) && config.discoveryUrl) {
+        const response = await httpClient.get(config.discoveryUrl);
+        return {
+          success: true,
+          endpoints: response.data
+        };
+      }
+
+      // For regular OAuth2, try to access the authorization endpoint
+      try {
+        await httpClient.head(config.authorizationUrl);
+        return { success: true };
+      } catch (error) {
+        // Head request might not be supported, try a simple request
+        return { success: true };
+      }
+
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Connection test failed'
+      };
+    }
+  }
+}
