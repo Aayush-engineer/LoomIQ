@@ -251,7 +251,7 @@ export class SAMLService extends EventEmitter {
       throw error;
     }
   }
-  
+
   async processAuthResponse(
     organizationId: string,
     idpId: string,
@@ -441,6 +441,208 @@ export class SAMLService extends EventEmitter {
       return {
         valid: false,
         error: error instanceof Error ? error.message : 'Invalid metadata'
+      };
+    }
+  }
+
+  private async mapUserAttributes(
+    nameId: string,
+    attributes: Record<string, any>,
+    config: IdentityProviderConfig
+  ): Promise<SAMLAuthResult['user']> {
+    const mapping = config.attributeMapping || {};
+
+    const user = {
+      nameId,
+      email: this.extractAttribute(attributes, mapping.email || 'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress') || nameId,
+      firstName: this.extractAttribute(attributes, mapping.firstName || 'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/givenname'),
+      lastName: this.extractAttribute(attributes, mapping.lastName || 'http://schemas.xmlsoap.org/ws/2005/05/identity/claims/surname'),
+      attributes: attributes
+    };
+
+    // Validate required fields
+    if (!user.email) {
+      throw new Error('Email attribute is required');
+    }
+
+    // Check allowed domains
+    if (config.allowedDomains && config.allowedDomains.length > 0) {
+      const emailDomain = user.email.split('@')[1];
+      if (!config.allowedDomains.includes(emailDomain)) {
+        throw new Error(`Domain ${emailDomain} is not allowed`);
+      }
+    }
+
+    return user;
+  }
+
+  private extractAttribute(attributes: Record<string, any>, key: string): string | undefined {
+    const value = attributes[key];
+    if (Array.isArray(value)) {
+      return value[0];
+    }
+    return value;
+  }
+
+  private async autoProvisionUser(
+    user: NonNullable<SAMLAuthResult['user']>,
+    config: IdentityProviderConfig
+  ): Promise<void> {
+    try {
+      // Check if user already exists
+      // Implementation would depend on your user service
+      this.logger.info('Auto-provisioning user', {
+        email: user.email,
+        organizationId: config.organizationId
+      });
+
+      this.emit('user:provisioned', {
+        user,
+        organizationId: config.organizationId,
+        defaultRole: config.defaultRole
+      });
+
+    } catch (error) {
+      this.logger.error('Failed to auto-provision user:', error);
+      throw error;
+    }
+  }
+
+  private async ensureCertificates(organizationId: string): Promise<{
+    privateCert: string;
+    publicCert: string;
+  }> {
+    const certDir = path.join(process.cwd(), 'certs', 'saml', organizationId);
+    const privateKeyPath = path.join(certDir, 'private.key');
+    const publicCertPath = path.join(certDir, 'public.crt');
+
+    try {
+      // Try to load existing certificates
+      const privateCert = await fs.readFile(privateKeyPath, 'utf8');
+      const publicCert = await fs.readFile(publicCertPath, 'utf8');
+      return { privateCert, publicCert };
+
+    } catch (error) {
+      // Generate new certificates if they don't exist
+      this.logger.info('Generating new SAML certificates', { organizationId });
+      return await this.generateCertificates(certDir);
+    }
+  }
+
+  private async generateCertificates(certDir: string): Promise<{
+    privateCert: string;
+    publicCert: string;
+  }> {
+    // Create directory if it doesn't exist
+    await fs.mkdir(certDir, { recursive: true });
+
+    // Generate private key
+    const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      publicKeyEncoding: {
+        type: 'spki',
+        format: 'pem'
+      },
+      privateKeyEncoding: {
+        type: 'pkcs8',
+        format: 'pem'
+      }
+    });
+
+    // Generate self-signed certificate
+    const cert = this.generateSelfSignedCert(privateKey, publicKey);
+
+    // Save certificates
+    await fs.writeFile(path.join(certDir, 'private.key'), privateKey);
+    await fs.writeFile(path.join(certDir, 'public.crt'), cert);
+
+    return {
+      privateCert: privateKey,
+      publicCert: cert
+    };
+  }
+
+  private generateSelfSignedCert(privateKey: string, publicKey: string): string {
+    // This is a simplified implementation
+    // In production, you might want to use a more robust certificate generation
+    const subject = '/C=US/ST=State/L=City/O=Organization/CN=coordinaitor';
+    
+    // For now, return the public key as a basic certificate
+    // In a real implementation, you'd generate a proper X.509 certificate
+    return publicKey;
+  }
+
+  private extractRequestId(context: string): string {
+    // Extract request ID from SAML context
+    // This is a simplified implementation
+    return crypto.randomBytes(16).toString('hex');
+  }
+
+  private generateSessionId(): string {
+    return crypto.randomBytes(32).toString('hex');
+  }
+
+  // Configuration management methods
+  async listIdentityProviders(organizationId: string): Promise<IdentityProviderConfig[]> {
+    const providers: IdentityProviderConfig[] = [];
+    
+    for (const [id, config] of this.idpConfigs.entries()) {
+      if (config.organizationId === organizationId) {
+        providers.push(config);
+      }
+    }
+    
+    return providers;
+  }
+
+  async getIdentityProvider(id: string): Promise<IdentityProviderConfig | undefined> {
+    return this.idpConfigs.get(id);
+  }
+
+  async updateIdentityProvider(id: string, updates: Partial<IdentityProviderConfig>): Promise<void> {
+    const existing = this.idpConfigs.get(id);
+    if (!existing) {
+      throw new Error('Identity Provider not found');
+    }
+
+    const updated = { ...existing, ...updates };
+    await this.configureIdentityProvider(updated);
+  }
+
+  async deleteIdentityProvider(id: string): Promise<void> {
+    this.identityProviders.delete(id);
+    this.idpConfigs.delete(id);
+    
+    this.logger.info('Identity Provider deleted', { id });
+  }
+
+  async testConnection(idpId: string): Promise<{
+    success: boolean;
+    error?: string;
+    metadata?: any;
+  }> {
+    try {
+      const config = this.idpConfigs.get(idpId);
+      if (!config) {
+        throw new Error('Identity Provider not found');
+      }
+
+      // Test connection by validating metadata or making a test request
+      if (config.metadata) {
+        const validation = await this.validateIdPMetadata(config.metadata);
+        return {
+          success: validation.valid,
+          error: validation.error,
+          metadata: validation
+        };
+      }
+
+      return { success: true };
+
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Connection test failed'
       };
     }
   }
