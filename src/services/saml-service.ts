@@ -251,5 +251,197 @@ export class SAMLService extends EventEmitter {
       throw error;
     }
   }
+  
+  async processAuthResponse(
+    organizationId: string,
+    idpId: string,
+    samlResponse: string,
+    relayState?: string
+  ): Promise<SAMLAuthResult> {
+    const serviceProvider = this.serviceProviders.get(organizationId);
+    const identityProvider = this.identityProviders.get(idpId);
+    const idpConfig = this.idpConfigs.get(idpId);
 
+    if (!serviceProvider || !identityProvider || !idpConfig) {
+      throw new Error('Service Provider or Identity Provider not configured');
+    }
+
+    try {
+      const { extract } = await serviceProvider.parseLoginResponse(identityProvider, 'post', {
+        body: { SAMLResponse: samlResponse, RelayState: relayState }
+      });
+
+      const attributes = extract.attributes || {};
+      const nameId = extract.nameID;
+
+      // Map attributes based on configuration
+      const user = await this.mapUserAttributes(nameId, attributes, idpConfig);
+
+      // Auto-provision user if enabled
+      if (idpConfig.autoProvisionUsers) {
+        await this.autoProvisionUser(user, idpConfig);
+      }
+
+      // Generate session
+      const sessionId = this.generateSessionId();
+
+      this.logger.info('SAML authentication successful', {
+        organizationId,
+        idpId,
+        nameId,
+        email: user.email,
+        sessionId
+      });
+
+      this.emit('authentication:success', {
+        organizationId,
+        idpId,
+        user,
+        sessionId
+      });
+
+      return {
+        success: true,
+        user,
+        sessionId,
+        relayState
+      };
+
+    } catch (error) {
+      this.logger.error('SAML authentication failed:', error);
+
+      this.emit('authentication:failure', {
+        organizationId,
+        idpId,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Authentication failed'
+      };
+    }
+  }
+
+  async generateLogoutRequest(
+    organizationId: string,
+    idpId: string,
+    nameId: string,
+    sessionId?: string
+  ): Promise<{ url: string; id: string }> {
+    const serviceProvider = this.serviceProviders.get(organizationId);
+    const identityProvider = this.identityProviders.get(idpId);
+
+    if (!serviceProvider || !identityProvider) {
+      throw new Error('Service Provider or Identity Provider not configured');
+    }
+
+    try {
+      const { context, entityEndpoint } = serviceProvider.createLogoutRequest(
+        identityProvider,
+        'redirect',
+        {
+          nameID: nameId,
+          sessionIndex: sessionId
+        }
+      );
+
+      const requestId = this.extractRequestId(context);
+
+      this.logger.info('SAML logout request generated', {
+        organizationId,
+        idpId,
+        nameId,
+        requestId
+      });
+
+      return {
+        url: entityEndpoint,
+        id: requestId
+      };
+
+    } catch (error) {
+      this.logger.error('Failed to generate SAML logout request:', error);
+      throw error;
+    }
+  }
+
+  async processLogoutResponse(
+    organizationId: string,
+    idpId: string,
+    samlResponse: string
+  ): Promise<{ success: boolean; error?: string }> {
+    const serviceProvider = this.serviceProviders.get(organizationId);
+    const identityProvider = this.identityProviders.get(idpId);
+
+    if (!serviceProvider || !identityProvider) {
+      throw new Error('Service Provider or Identity Provider not configured');
+    }
+
+    try {
+      await serviceProvider.parseLogoutResponse(identityProvider, 'redirect', {
+        query: { SAMLResponse: samlResponse }
+      });
+
+      this.logger.info('SAML logout successful', {
+        organizationId,
+        idpId
+      });
+
+      this.emit('logout:success', { organizationId, idpId });
+
+      return { success: true };
+
+    } catch (error) {
+      this.logger.error('SAML logout failed:', error);
+
+      this.emit('logout:failure', {
+        organizationId,
+        idpId,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Logout failed'
+      };
+    }
+  }
+
+  async getServiceProviderMetadata(organizationId: string): Promise<string> {
+    const serviceProvider = this.serviceProviders.get(organizationId);
+    if (!serviceProvider) {
+      throw new Error('Service Provider not configured');
+    }
+
+    return serviceProvider.getMetadata();
+  }
+
+  async validateIdPMetadata(metadata: string): Promise<{
+    valid: boolean;
+    entityId?: string;
+    ssoUrl?: string;
+    sloUrl?: string;
+    certificates?: string[];
+    error?: string;
+  }> {
+    try {
+      const tempIdP = saml.IdentityProvider({ metadata });
+      const info = tempIdP.entityMeta;
+
+      return {
+        valid: true,
+        entityId: info.entityID,
+        ssoUrl: info.singleSignOnService?.[0]?.Location,
+        sloUrl: info.singleLogoutService?.[0]?.Location,
+        certificates: info.signingCert ? [info.signingCert] : []
+      };
+
+    } catch (error) {
+      return {
+        valid: false,
+        error: error instanceof Error ? error.message : 'Invalid metadata'
+      };
+    }
+  }
 }
