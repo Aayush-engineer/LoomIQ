@@ -53,7 +53,77 @@ export function initializeAuthRoutes(
   authMiddleware = middleware;
 }
 
-
+/**
+ * @openapi
+ * /auth/methods/{organizationId}:
+ *   get:
+ *     tags:
+ *       - Authentication
+ *     summary: Get available authentication methods
+ *     description: Retrieve all available authentication methods for an organization, including local auth, SAML, and OAuth2 providers
+ *     parameters:
+ *       - in: path
+ *         name: organizationId
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *         required: false
+ *         description: Organization ID (defaults to 'default')
+ *     responses:
+ *       200:
+ *         description: List of available authentication methods
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 organizationId:
+ *                   type: string
+ *                   description: Organization identifier
+ *                 methods:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id:
+ *                         type: string
+ *                         description: Method identifier
+ *                       name:
+ *                         type: string
+ *                         description: Display name
+ *                       type:
+ *                         type: string
+ *                         enum: [local, saml, oauth2, oidc]
+ *                       provider:
+ *                         type: string
+ *                         description: Provider name (for OAuth2)
+ *                       enabled:
+ *                         type: boolean
+ *                       loginUrl:
+ *                         type: string
+ *                         format: uri
+ *                         description: Authentication initiation URL
+ *             example:
+ *               organizationId: "default"
+ *               methods:
+ *                 - id: "local"
+ *                   name: "Email/Password"
+ *                   type: "local"
+ *                   enabled: true
+ *                   loginUrl: "/auth/login"
+ *                 - id: "google-sso"
+ *                   name: "Google OAuth2"
+ *                   type: "oauth2"
+ *                   provider: "google"
+ *                   enabled: true
+ *                   loginUrl: "/auth/oauth2/google-sso/login"
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.get('/methods/:organizationId?', async (req: Request, res: Response) => {
   try {
     const organizationId = req.params.organizationId || 'default';
@@ -106,7 +176,78 @@ router.get('/methods/:organizationId?', async (req: Request, res: Response) => {
   }
 });
 
-
+/**
+ * @openapi
+ * /auth/login:
+ *   post:
+ *     tags:
+ *       - Authentication
+ *     summary: Local authentication login
+ *     description: Authenticate a user with email and password
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - email
+ *               - password
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 format: email
+ *                 description: User email address
+ *                 example: "user@example.com"
+ *               password:
+ *                 type: string
+ *                 format: password
+ *                 description: User password
+ *                 example: "SecurePassword123!"
+ *               organizationId:
+ *                 type: string
+ *                 format: uuid
+ *                 description: Organization ID (optional, defaults to 'default')
+ *                 example: "org-123"
+ *     responses:
+ *       200:
+ *         description: Login successful
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 user:
+ *                   $ref: '#/components/schemas/User'
+ *                 token:
+ *                   type: string
+ *                   description: JWT authentication token
+ *                   example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+ *                 expiresIn:
+ *                   type: string
+ *                   description: Token expiration time
+ *                   example: "24h"
+ *       400:
+ *         description: Missing required fields
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *             example:
+ *               error: "Email and password are required"
+ *       401:
+ *         description: Authentication failed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *             example:
+ *               error: "Authentication failed"
+ *               message: "Invalid credentials"
+ */
 router.post('/login', async (req: Request, res: Response) => {
   try {
     const { email, password, organizationId } = req.body;
@@ -415,7 +556,6 @@ router.post('/saml/:idpId/sls', async (req: Request, res: Response) => {
   }
 });
 
-
 // OAuth2/OIDC Authentication Routes
 
 /**
@@ -575,3 +715,92 @@ router.get('/saml/:organizationId/metadata', async (req: Request, res: Response)
     });
   }
 });
+
+/**
+ * Validate SAML IdP metadata
+ */
+router.post('/saml/validate-metadata', async (req: Request, res: Response) => {
+  if (!samlService) {
+    return res.status(500).json({ error: 'SAML not configured' });
+  }
+
+  try {
+    const { metadata } = req.body;
+    
+    if (!metadata) {
+      return res.status(400).json({ error: 'Metadata is required' });
+    }
+
+    const validation = await samlService.validateIdPMetadata(metadata);
+    
+    res.json(validation);
+
+  } catch (error) {
+    logger.error('SAML metadata validation failed:', error);
+    res.status(500).json({ 
+      error: 'Failed to validate SAML metadata' 
+    });
+  }
+});
+
+/**
+ * Test OAuth2 provider connection
+ */
+router.post('/oauth2/:providerId/test', async (req: Request, res: Response) => {
+  const { providerId } = req.params;
+  
+  if (!oauthService) {
+    return res.status(500).json({ error: 'OAuth2 not configured' });
+  }
+
+  try {
+    const result = await oauthService.testConnection(providerId);
+    res.json(result);
+
+  } catch (error) {
+    logger.error('OAuth2 connection test failed:', error);
+    res.status(500).json({ 
+      error: 'Failed to test OAuth2 connection' 
+    });
+  }
+});
+
+/**
+ * Refresh OAuth2 access token
+ */
+router.post('/oauth2/:providerId/refresh', async (req: Request, res: Response) => {
+  const { providerId } = req.params;
+  const { refreshToken } = req.body;
+  
+  if (!oauthService) {
+    return res.status(500).json({ error: 'OAuth2 not configured' });
+  }
+
+  if (!refreshToken) {
+    return res.status(400).json({ error: 'Refresh token is required' });
+  }
+
+  try {
+    const result = await oauthService.refreshAccessToken(providerId, refreshToken);
+    
+    if (result.success) {
+      res.json({
+        success: true,
+        tokens: result.tokens
+      });
+    } else {
+      res.status(401).json({
+        error: 'Token refresh failed',
+        message: result.error
+      });
+    }
+
+  } catch (error) {
+    logger.error('OAuth2 token refresh failed:', error);
+    res.status(500).json({ 
+      error: 'Failed to refresh OAuth2 token' 
+    });
+  }
+});
+
+export default router;
