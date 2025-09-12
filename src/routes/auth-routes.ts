@@ -214,7 +214,79 @@ export function createAuthRoutes(authService: AuthService): Router {
     }
   );
 
+  // Role management
+  router.get('/roles',
+    authMiddleware.authenticate,
+    authMiddleware.requirePermission('roles:read'),
+    async (req: Request, res: Response) => {
+      try {
+        const roles = authService.getAllRoles();
+        res.json({ roles });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    }
+  );
 
+  router.post('/roles',
+    authMiddleware.authenticate,
+    authMiddleware.requirePermission('roles:create'),
+    async (req: Request, res: Response) => {
+      try {
+        const { name, description, permissions } = req.body;
+        
+        if (!name || !description || !Array.isArray(permissions)) {
+          return res.status(400).json({ 
+            error: 'Name, description, and permissions array are required' 
+          });
+        }
+
+        const role = authService.createRole(name, description, permissions);
+        res.json({ role });
+      } catch (error: any) {
+        res.status(400).json({ error: error.message });
+      }
+    }
+  );
+
+  router.put('/roles/:roleId',
+    authMiddleware.authenticate,
+    authMiddleware.requirePermission('roles:update'),
+    async (req: Request, res: Response) => {
+      try {
+        const role = authService.updateRole(req.params.roleId, req.body);
+        res.json({ role });
+      } catch (error: any) {
+        res.status(400).json({ error: error.message });
+      }
+    }
+  );
+
+  router.delete('/roles/:roleId',
+    authMiddleware.authenticate,
+    authMiddleware.requirePermission('roles:delete'),
+    async (req: Request, res: Response) => {
+      try {
+        authService.deleteRole(req.params.roleId);
+        res.json({ message: 'Role deleted successfully' });
+      } catch (error: any) {
+        res.status(400).json({ error: error.message });
+      }
+    }
+  );
+
+  // Permissions list
+  router.get('/permissions',
+    authMiddleware.authenticate,
+    async (req: Request, res: Response) => {
+      try {
+        const permissions = authService.getAllPermissions();
+        res.json({ permissions });
+      } catch (error: any) {
+        res.status(500).json({ error: error.message });
+      }
+    }
+  );
 
   return router;
 }
