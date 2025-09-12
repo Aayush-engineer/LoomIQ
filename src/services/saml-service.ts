@@ -61,8 +61,9 @@ export interface SAMLAuthResult {
 export class SAMLService extends EventEmitter {
   private logger: winston.Logger;
   private db: DatabaseService;
-  private serviceProviders: Map<string, saml.ServiceProvider> = new Map();
-  private identityProviders: Map<string, saml.IdentityProvider> = new Map();
+  
+  private serviceProviders: Map<string, ReturnType<typeof saml.ServiceProvider>> = new Map();
+  private identityProviders: Map<string, ReturnType<typeof saml.IdentityProvider>> = new Map();
   private configs: Map<string, SAMLConfig> = new Map();
   private idpConfigs: Map<string, IdentityProviderConfig> = new Map();
 
@@ -228,8 +229,8 @@ export class SAMLService extends EventEmitter {
           allowCreate: true,
           isPassive: false,
           forceAuthn: false
-        }
-      );
+        } as any
+      ) as any;
 
       const requestId = this.extractRequestId(context);
 
@@ -276,11 +277,23 @@ export class SAMLService extends EventEmitter {
 
       // Map attributes based on configuration
       const user = await this.mapUserAttributes(nameId, attributes, idpConfig);
+      
+      if (!user) {
+        this.logger.error('No user could be mapped from SAML attributes', {
+          organizationId,
+          idpId,
+          nameId,
+        });
 
-      // Auto-provision user if enabled
-      if (idpConfig.autoProvisionUsers) {
-        await this.autoProvisionUser(user, idpConfig);
+        return {
+          success: false,
+          error: 'User mapping failed',
+        };
       }
+            // Auto-provision user if enabled
+            if (idpConfig.autoProvisionUsers) {
+              await this.autoProvisionUser(user, idpConfig);
+            }
 
       // Generate session
       const sessionId = this.generateSessionId();
@@ -343,8 +356,8 @@ export class SAMLService extends EventEmitter {
         {
           nameID: nameId,
           sessionIndex: sessionId
-        }
-      );
+        } as any
+      ) as any;
 
       const requestId = this.extractRequestId(context);
 
@@ -417,33 +430,49 @@ export class SAMLService extends EventEmitter {
     return serviceProvider.getMetadata();
   }
 
-  async validateIdPMetadata(metadata: string): Promise<{
-    valid: boolean;
-    entityId?: string;
-    ssoUrl?: string;
-    sloUrl?: string;
-    certificates?: string[];
-    error?: string;
-  }> {
-    try {
-      const tempIdP = saml.IdentityProvider({ metadata });
-      const info = tempIdP.entityMeta;
+  async validateIdPMetadata(
+  metadata: string
+): Promise<{
+  valid: boolean;
+  entityId?: string;
+  ssoUrl?: string;
+  sloUrl?: string;
+  certificates?: string[];
+  error?: string;
+}> {
+  try {
+    const tempIdP = saml.IdentityProvider({ metadata });
+    const meta = tempIdP.entityMeta;
 
-      return {
-        valid: true,
-        entityId: info.entityID,
-        ssoUrl: info.singleSignOnService?.[0]?.Location,
-        sloUrl: info.singleLogoutService?.[0]?.Location,
-        certificates: info.signingCert ? [info.signingCert] : []
-      };
+    const entityId = meta.getEntityID();
 
-    } catch (error) {
-      return {
-        valid: false,
-        error: error instanceof Error ? error.message : 'Invalid metadata'
-      };
-    }
+    // --- Handle SSO endpoint (string or object) ---
+    const ssoService = meta.getSingleSignOnService('redirect');
+    const ssoUrl =
+      typeof ssoService === 'string'
+        ? ssoService
+        : (ssoService as any)?.location;
+
+    // --- Handle SLO endpoint (string or object) ---
+    const sloService = meta.getSingleLogoutService('redirect');
+    const sloUrl =
+      typeof sloService === 'string'
+        ? sloService
+        : (sloService as any)?.location;
+
+    // --- Certificates: pass the "use" argument & coerce to array ---
+    const certs = meta.getX509Certificate('signing');
+    const certificates = Array.isArray(certs) ? certs : [certs];
+
+    return { valid: true, entityId, ssoUrl, sloUrl, certificates };
+  } catch (error) {
+    return {
+      valid: false,
+      error: error instanceof Error ? error.message : 'Invalid metadata',
+    };
   }
+}
+
 
   private async mapUserAttributes(
     nameId: string,
