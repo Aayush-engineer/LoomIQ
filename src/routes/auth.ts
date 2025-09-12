@@ -414,3 +414,164 @@ router.post('/saml/:idpId/sls', async (req: Request, res: Response) => {
     res.redirect('/login');
   }
 });
+
+
+// OAuth2/OIDC Authentication Routes
+
+/**
+ * OAuth2 Login - Initiate authentication
+ */
+router.get('/oauth2/:providerId/login', async (req: Request, res: Response) => {
+  const { providerId } = req.params;
+  const state = req.query.state as string;
+  
+  if (!oauthService) {
+    return res.status(500).json({ error: 'OAuth2 not configured' });
+  }
+
+  try {
+    const authRequest = await oauthService.generateAuthorizationUrl(
+      providerId,
+      state
+    );
+
+    // Store state and code verifier in session for validation
+    req.session = req.session || {};
+    (req.session as any).oauth2State = authRequest.state;
+    (req.session as any).oauth2CodeVerifier = authRequest.codeVerifier;
+    (req.session as any).oauth2Nonce = authRequest.nonce;
+
+    logger.info('OAuth2 authentication initiated', {
+      providerId,
+      state: authRequest.state
+    });
+
+    res.redirect(authRequest.url);
+
+  } catch (error) {
+    logger.error('OAuth2 authentication initiation failed:', error);
+    res.status(500).json({ 
+      error: 'Failed to initiate OAuth2 authentication' 
+    });
+  }
+});
+
+/**
+ * OAuth2 Callback - Process authentication response
+ */
+router.get('/oauth2/:providerId/callback', async (req: Request, res: Response) => {
+  const { providerId } = req.params;
+  
+  if (!oauthService) {
+    return res.status(500).json({ error: 'OAuth2 not configured' });
+  }
+
+  try {
+    const code = req.query.code as string;
+    const state = req.query.state as string;
+    const error = req.query.error as string;
+    const codeVerifier = (req.session as any)?.oauth2CodeVerifier;
+
+    if (error) {
+      logger.warn('OAuth2 authentication error', {
+        providerId,
+        error,
+        errorDescription: req.query.error_description
+      });
+
+      return res.status(401).json({
+        error: 'OAuth2 authentication failed',
+        message: req.query.error_description || error
+      });
+    }
+
+    if (!code) {
+      return res.status(400).json({ 
+        error: 'Authorization code not provided' 
+      });
+    }
+
+    const authResult = await oauthService.exchangeCodeForTokens(
+      providerId,
+      code,
+      state,
+      codeVerifier
+    );
+
+    if (!authResult.success || !authResult.user) {
+      logger.warn('OAuth2 token exchange failed', {
+        providerId,
+        error: authResult.error
+      });
+
+      return res.status(401).json({
+        error: 'OAuth2 authentication failed',
+        message: authResult.error
+      });
+    }
+
+    // Create authenticated user object
+    const organizationId = req.query.organizationId as string || 'default';
+    const user = {
+      id: authResult.user.id,
+      email: authResult.user.email,
+      name: authResult.user.name,
+      organizationId,
+      roles: ['org_member'], // Would be populated from OAuth2 attributes
+      permissions: ['task:read', 'task:write'], // Would be populated from roles
+      authMethod: 'oauth2' as const
+    };
+
+    // Create session
+    const session = await authMiddleware.createSession(user, req);
+
+    // Set session cookie
+    res.cookie('sessionId', session.sessionId, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: 24 * 60 * 60 * 1000, // 24 hours
+      sameSite: 'lax'
+    });
+
+    logger.info('OAuth2 authentication successful', {
+      providerId,
+      organizationId,
+      userId: user.id,
+      email: user.email
+    });
+
+    // Redirect to state or default
+    const redirectUrl = authResult.state || '/dashboard';
+    res.redirect(redirectUrl);
+
+  } catch (error) {
+    logger.error('OAuth2 callback processing failed:', error);
+    res.status(500).json({ 
+      error: 'Failed to process OAuth2 authentication' 
+    });
+  }
+});
+
+/**
+ * Get SAML Service Provider metadata
+ */
+router.get('/saml/:organizationId/metadata', async (req: Request, res: Response) => {
+  const { organizationId } = req.params;
+  
+  if (!samlService) {
+    return res.status(500).json({ error: 'SAML not configured' });
+  }
+
+  try {
+    const metadata = await samlService.getServiceProviderMetadata(organizationId);
+    
+    res.set('Content-Type', 'application/xml');
+    res.send(metadata);
+
+  } catch (error) {
+    logger.error('Failed to get SAML metadata:', error);
+    res.status(500).json({ 
+      error: 'Failed to retrieve SAML metadata' 
+    });
+  }
+});
