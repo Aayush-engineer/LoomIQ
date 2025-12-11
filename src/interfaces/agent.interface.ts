@@ -56,3 +56,55 @@ export interface AgentResponse {
   tokensUsed?: number;
   cost?: number;
 }
+
+export abstract class BaseAgent {
+  public id: string;
+  public name: string;
+  public provider: string;
+  public capabilities: AgentCapability[];
+  public status: AgentStatus;
+  protected apiKey?: string;
+
+  constructor(public config: AgentConfig) {
+    this.id = config.id;
+    this.name = config.name;
+    this.provider = config.provider;
+    this.capabilities = config.capabilities;
+    this.apiKey = config.apiKey;
+    this.status = {
+      id: config.id,
+      state: 'offline',
+      lastActivity: new Date(),
+      totalTasksCompleted: 0,
+      successRate: 1.0,
+      averageResponseTime: 0
+    };
+  }
+  
+  abstract initialize(): Promise<void>;
+  abstract execute(request: AgentRequest): Promise<AgentResponse>;
+  abstract getStatus(): AgentStatus;
+  abstract shutdown(): Promise<void>;
+  
+  getCapabilities(): AgentCapability[] {
+    return this.config.capabilities;
+  }
+  
+  getCost(): AgentConfig['cost'] {
+    return this.config.cost;
+  }
+  
+  isHealthy(): boolean {
+    const status = this.getStatus();
+    return status.state !== 'error' && status.state !== 'offline';
+  }
+}
+
+export interface Agent extends BaseAgent {
+  id: string;
+  name: string;
+  provider: string;
+  capabilities: AgentCapability[];
+  status: AgentStatus;
+  cost?: AgentConfig['cost'];
+}
