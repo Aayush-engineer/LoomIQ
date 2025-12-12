@@ -11,6 +11,7 @@ import { AgentRegistry } from './agents/agent-registry';
 import path from 'path';
 import { GroqAgent } from './agents/implementations/groq-agent';
 import { MistralAgent } from './agents/implementations/Mistral-agent';
+import { TaskOrchestrator } from './orchestration/task-orchestratortask-orchestrator';
 dotenv.config();
 
 
@@ -71,7 +72,7 @@ async function main() {
     logger.info('✅ Mistral agent registered');
   }
 
-
+  const taskOrchestrator = new TaskOrchestrator(agentRegistry, communicationHub);
   app.use(express.json());
 
   app.use((req, res, next) => {
