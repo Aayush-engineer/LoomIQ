@@ -92,6 +92,36 @@ async function main() {
 
  
   app.use('/api/legacy-auth', legacyAuthRoutes); // No auth
+
+  app.post('/api/tasks', async (req, res) => {
+    try {
+      const { prompt, type, priority, context, useCollaboration } = req.body;
+      
+      const task = await taskOrchestrator.createTask({
+        prompt,
+        type: type || 'implementation',
+        priority: priority || 'medium',
+        context,
+        useCollaboration
+      });
+
+      console.log("this is my data comming from user",task);
+      
+      const result = await taskOrchestrator.executeTask(task.id, useCollaboration);
+      
+      res.json({ 
+        success: true,
+        task, 
+        result 
+      });
+    } catch (error) {
+      logger.error('Task execution failed', error);
+      res.status(500).json({ 
+        success: false,
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+    }
+  });
   
   app.get('/api/tasks/:taskId', async (req, res) => {
     try {
