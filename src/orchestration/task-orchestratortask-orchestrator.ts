@@ -118,5 +118,33 @@ export class TaskOrchestrator extends EventEmitter {
     return task;
    }
 
-   
+   public async executeTask(taskId: string, forceCollaboration?: boolean): Promise<any> {
+    const task = this.tasks.get(taskId);
+    if (!task) {
+      throw new Error('Task not found');
+    }
+
+    const useCollaboration = forceCollaboration || 
+                            task.metadata?.useCollaboration || 
+                            this.shouldUseCollaboration(task);
+
+    if (useCollaboration) {
+      return this.executeWithCollaboration(task);
+    } else {
+      return this.executeSingleAgent(task);
+    }
+   }
+
+    private generateTaskTitle(prompt: string): string {
+        const firstLine = prompt.split('\n')[0];
+        const title = firstLine.substring(0, 100);
+        return title.length < firstLine.length ? title + '...' : title;
+    }
+
+    private sortTaskQueue(): void {
+    const priorityOrder = { critical: 0, high: 1, medium: 2, low: 3 };
+    this.taskQueue.sort((a, b) => {
+      return priorityOrder[a.priority] - priorityOrder[b.priority];
+    });
+  }
 }
