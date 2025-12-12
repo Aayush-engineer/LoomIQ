@@ -42,7 +42,6 @@ async function main() {
   const httpServer = createServer(app);
   const port = process.env.PORT || 3000;
 
- 
   const communicationHub = new CommunicationHubImplementation();
   await communicationHub.initialize(4000);
 

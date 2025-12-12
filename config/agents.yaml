@@ -1,0 +1,117 @@
+agents:
+  - id: groq-001
+    name: Groq Llama Agent
+    type: api
+    provider: groq
+    version: "1.0"
+    endpoint: https://api.groq.com/openai/v1
+    maxConcurrentTasks: 15
+    timeout: 60000
+    systemPrompt: "You are a senior code reviewer focused on quality, security, and best practices."
+    metadata:
+      model: llama-3.3-70b-versatile
+      temperature: 0.7
+    capabilities:
+      - name: code-review
+        description: Review code for quality and security
+        category: test
+        complexity: moderate
+        languages:
+          - typescript
+          - python
+          - javascript
+          - java
+          - go
+          - rust
+        specialties:
+          - security-analysis
+          - best-practices
+          - bug-detection
+          - performance-optimization
+      - name: code-generation
+        description: Generate and improve code at high speed
+        category: implementation
+        complexity: moderate
+        languages:
+          - typescript
+          - python
+          - javascript
+          - java
+        specialties:
+          - refactoring
+          - optimization
+          - algorithm-design
+      - name: documentation
+        description: Generate comprehensive documentation
+        category: general
+        complexity: simple
+      - name: rapid-response
+        description: Ultra-fast responses with low latency
+        category: general
+        complexity: simple
+    cost:
+      perRequest: 0.00
+      monthly: 0
+
+  - id: mistral-001
+    name: Mistral AI Agent
+    type: api
+    provider: mistral
+    version: "1.0"
+    endpoint: https://api.mistral.ai/v1
+    maxConcurrentTasks: 10
+    timeout: 90000
+    systemPrompt: "You are a versatile AI assistant with strong capabilities in reasoning, multilingual tasks, and technical problem-solving."
+    metadata:
+      model: mistral-small-latest
+      temperature: 0.7
+    capabilities:
+      - name: code-generation
+        description: Generate code across multiple languages
+        category: implementation
+        complexity: moderate
+        languages:
+          - python
+          - javascript
+          - typescript
+          - java
+          - go
+        specialties:
+          - api-development
+          - backend-development
+          - scripting
+      - name: multilingual-support
+        description: Handle multilingual content and translation
+        category: general
+        complexity: moderate
+        specialties:
+          - translation
+          - localization
+          - international-support
+      - name: reasoning
+        description: Complex reasoning and analysis
+        category: planning
+        complexity: complex
+        specialties:
+          - logical-analysis
+          - decision-making
+          - problem-decomposition
+      - name: documentation
+        description: Create technical documentation
+        category: general
+        complexity: simple
+        specialties:
+          - api-docs
+          - user-guides
+          - technical-writing
+      - name: code-review
+        description: Review code for improvements
+        category: test
+        complexity: moderate
+        specialties:
+          - best-practices
+          - code-quality
+          - maintainability
+    cost:
+      perRequest: 0.00
+      monthly: 0
