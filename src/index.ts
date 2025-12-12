@@ -73,6 +73,8 @@ async function main() {
   }
 
   const taskOrchestrator = new TaskOrchestrator(agentRegistry, communicationHub);
+
+  // express middleware
   app.use(express.json());
 
   app.use((req, res, next) => {
@@ -91,6 +93,37 @@ async function main() {
  
   app.use('/api/legacy-auth', legacyAuthRoutes); // No auth
   
+  app.get('/api/tasks/:taskId', async (req, res) => {
+    try {
+      const task = taskOrchestrator.getTask(req.params.taskId);
+      if (!task) {
+        return res.status(404).json({ error: 'Task not found' });
+      }
+      res.json({ task });
+    } catch (error) {
+      logger.error('Failed to get task', error);
+      res.status(500).json({ 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+    }
+  });
+
+  app.get('/api/tasks', async (req, res) => {
+    try {
+      const { status, type, priority } = req.query;
+      const tasks = await taskOrchestrator.getTasks({
+        status: status as any,
+        type: type as any,
+        priority: priority as any
+      });
+      res.json({ tasks });
+    } catch (error) {
+      logger.error('Failed to get tasks', error);
+      res.status(500).json({ 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+    }
+  });
 
 
   // Health check
