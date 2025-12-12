@@ -150,7 +150,27 @@ export class MCPServerImplementation implements MCPServer {
       });
     });
   }
-  
+
+    public async start(): Promise<void> {
+    return new Promise((resolve) => {
+      this.httpServer.listen(this.port, () => {
+        this.logger.info(`MCP Server '${this.name}' started on port ${this.port}`);
+        resolve();
+      });
+    });
+  }
+
+  public async stop(): Promise<void> {
+    return new Promise((resolve) => {
+      this.io.close(() => {
+        this.httpServer.close(() => {
+          this.logger.info(`MCP Server '${this.name}' stopped`);
+          resolve();
+        });
+      });
+    });
+  }
+
 
 
 }
