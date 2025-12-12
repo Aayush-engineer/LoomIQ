@@ -89,4 +89,42 @@ export class MCPClient {
         }
     }
 
+    public async getAvailableTools(): Promise<MCPTool[]> {
+    try {
+      const response = await this.httpClient.get('/tools');
+      return response.data.tools;
+    } catch (error) {
+      this.logger.error('Failed to fetch tools:', error);
+      throw error;
+    }
+  }
+
+  public async executeTool(toolName: string, input: any): Promise<any> {
+    const requestId = uuidv4();
+    try {
+      const response = await this.httpClient.post(`/tools/${toolName}/execute`, {
+        input,
+        requestId
+      });
+      
+      if (response.data.success) {
+        return response.data.result;
+      } else {
+        throw new Error(response.data.error);
+      }
+    } catch (error) {
+      this.logger.error(`Failed to execute tool ${toolName}:`, error);
+      throw error;
+    }
+  }
+
+  public subscribe(event: string, handler: (message: Message) => void): void {
+    if (!this.socket || !this.connected) {
+      throw new Error('Not connected to MCP server');
+    }
+
+    this.messageHandlers.set(event, handler);
+    this.socket.emit('subscribe', event);
+  }
+
 }
