@@ -37,4 +37,56 @@ export class MCPClient {
     });
   }
 
+    public async connect(): Promise<void> {
+        return new Promise((resolve, reject) => {
+        this.socket = io(this.serverUrl, {
+            auth: {
+            token: this.secretKey
+            },
+            reconnection: true,
+            reconnectionAttempts: 5,
+            reconnectionDelay: 1000
+        });
+
+        this.socket.on('connect', () => {
+            this.connected = true;
+            this.logger.info(`Connected to MCP server at ${this.serverUrl}`);
+            resolve();
+        });
+
+        this.socket.on('connect_error', (error) => {
+            this.logger.error('Connection error:', error);
+            reject(error);
+        });
+
+        this.socket.on('disconnect', (reason) => {
+            this.connected = false;
+            this.logger.warn(`Disconnected from MCP server: ${reason}`);
+        });
+
+        this.socket.on('message', (message: Message) => {
+            const handler = this.messageHandlers.get(message.type);
+            if (handler) {
+            handler(message);
+            }
+        });
+
+        this.socket.on('tool-registered', (data) => {
+            this.logger.info(`New tool available: ${data.name}`);
+        });
+
+        this.socket.on('tool-unregistered', (data) => {
+            this.logger.info(`Tool removed: ${data.name}`);
+        });
+        });
+    }
+
+    public async disconnect(): Promise<void> {
+        if (this.socket) {
+        this.socket.disconnect();
+        this.socket = null;
+        this.connected = false;
+        }
+    }
+
 }
