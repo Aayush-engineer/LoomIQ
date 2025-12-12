@@ -6,7 +6,6 @@ import { MCPServer, MCPTool, Message } from '../interfaces/communication.interfa
 import { v4 as uuidv4 } from 'uuid';
 import winston from 'winston';
 
-
 export class MCPServerImplementation implements MCPServer {
   public id: string;
   public name: string;
@@ -55,7 +54,6 @@ export class MCPServerImplementation implements MCPServer {
     this.setupRoutes();
     this.setupSocketHandlers();
   }
-
 
   private setupMiddleware(): void {
     this.app.use(express.json());
@@ -151,7 +149,7 @@ export class MCPServerImplementation implements MCPServer {
     });
   }
 
-    public async start(): Promise<void> {
+  public async start(): Promise<void> {
     return new Promise((resolve) => {
       this.httpServer.listen(this.port, () => {
         this.logger.info(`MCP Server '${this.name}' started on port ${this.port}`);
@@ -195,7 +193,4 @@ export class MCPServerImplementation implements MCPServer {
   public on(event: string, handler: (data: any) => void): void {
     this.eventEmitter.on(event, handler);
   }
-
-
-
 }
