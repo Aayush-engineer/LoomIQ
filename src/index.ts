@@ -6,7 +6,13 @@ import { DatabaseService } from './database/database-service';
 import { AuthService } from './services/auth-service';
 import { createAuthMiddleware } from './middleware/auth-middleware';
 import { createAuthRoutes } from './routes/auth-routes';
+import { CommunicationHubImplementation } from './communication/communication-hub';
+import { AgentRegistry } from './agents/agent-registry';
+import path from 'path';
+import { GroqAgent } from './agents/implementations/groq-agent';
+import { MistralAgent } from './agents/implementations/Mistral-agent';
 dotenv.config();
+
 
 const logger = winston.createLogger({
   level: 'info',
@@ -24,7 +30,7 @@ const logger = winston.createLogger({
 
 
 async function main() {
-  logger.info('Starting multi-agent system');
+  logger.info('Starting loomiq system');
 
   const db = DatabaseService.getInstance();
   try {
@@ -35,9 +41,6 @@ async function main() {
     process.exit(1);
   }
 
-
-
-
   const app = express();
   const httpServer = createServer(app);
   const port = process.env.PORT || 3000;
@@ -45,7 +48,28 @@ async function main() {
   const communicationHub = new CommunicationHubImplementation();
   await communicationHub.initialize(4000);
 
+  const agentRegistry = new AgentRegistry();
+  const configPath = path.join(__dirname, '../config/agents.yaml');
+  await agentRegistry.loadConfigurations(configPath);
 
+
+  const groqConfig = agentRegistry.getAgentConfig('groq-001');
+  if (groqConfig) {
+      const groqAgent = new GroqAgent(groqConfig);
+      await groqAgent.initialize();
+      agentRegistry.registerAgent(groqAgent);
+      communicationHub.registerAgent(groqConfig.id);
+      logger.info('✅ Groq agent registered');
+  }
+
+  const mistralConfig = agentRegistry.getAgentConfig('mistral-001');
+  if (mistralConfig) {
+    const mistralAgent = new MistralAgent(mistralConfig);
+    await mistralAgent.initialize();
+    agentRegistry.registerAgent(mistralAgent);
+    communicationHub.registerAgent(mistralConfig.id);
+    logger.info('✅ Mistral agent registered');
+  }
 
 
   app.use(express.json());
