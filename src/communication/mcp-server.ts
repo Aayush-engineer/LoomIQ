@@ -171,6 +171,31 @@ export class MCPServerImplementation implements MCPServer {
     });
   }
 
+  public registerTool(tool: MCPTool): void {
+    this.tools.set(tool.name, tool);
+    this.logger.info(`Tool registered: ${tool.name}`);
+    this.io.emit('tool-registered', {
+      name: tool.name,
+      description: tool.description
+    });
+  }
+
+  public unregisterTool(name: string): void {
+    if (this.tools.delete(name)) {
+      this.logger.info(`Tool unregistered: ${name}`);
+      this.io.emit('tool-unregistered', { name });
+    }
+  }
+
+  public emit(event: string, data: any): void {
+    this.io.emit(event, data);
+    this.eventEmitter.emit(event, data);
+  }
+
+  public on(event: string, handler: (data: any) => void): void {
+    this.eventEmitter.on(event, handler);
+  }
+
 
 
 }
