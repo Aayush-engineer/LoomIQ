@@ -1,4 +1,4 @@
-import { DataSource } from 'typeorm';
+import { DataSource, EntityTarget, ObjectLiteral, Repository } from 'typeorm';
 import winston from 'winston';
 import { AppDataSource } from './data-source';
 import { UserRepository } from './repositories/UserRepository';
@@ -203,8 +203,8 @@ export class DatabaseService {
   }
 
   // Utility methods for direct entity access
-  public getRepository<T>(entity: any) {
-    return this.dataSource.getRepository<T>(entity);
+  public getRepository<T extends ObjectLiteral>(entity: EntityTarget<T>): Repository<T> {
+    return this.dataSource.getRepository(entity);
   }
 
   public async transaction<T>(work: (queryRunner: any) => Promise<T>): Promise<T> {

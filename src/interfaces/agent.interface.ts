@@ -18,6 +18,7 @@ export interface AgentConfig {
   endpoint?: string;
   capabilities: AgentCapability[];
   maxConcurrentTasks: number;
+  systemPrompt?: string;
   timeout: number;
   metadata?: Record<string, any>;
   cost?: {

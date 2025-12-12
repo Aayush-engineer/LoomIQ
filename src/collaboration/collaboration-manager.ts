@@ -27,7 +27,7 @@ export interface CollaborationResult {
 }
 
 export interface CollaborationStrategy {
-  type: 'sequential' | 'parallel' | 'consensus';
+  type: 'sequential' | 'parallel' | 'hierarchical' | 'consensus'; 
   config?: Record<string, any>;
 }
 

@@ -1,7 +1,7 @@
-import { Repository, EntityTarget, FindOptionsWhere, FindManyOptions, DeepPartial } from 'typeorm';
+import { Repository, EntityTarget, FindOptionsWhere, FindManyOptions, DeepPartial, ObjectLiteral } from 'typeorm';
 import { AppDataSource } from '../data-source';
 
-export abstract class BaseRepository<T> {
+export abstract class BaseRepository<T extends ObjectLiteral> {
   protected repository: Repository<T>;
 
   constructor(entity: EntityTarget<T>) {
