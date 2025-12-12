@@ -122,7 +122,8 @@ async function main() {
       });
     }
   });
-  
+
+  // Get task status
   app.get('/api/tasks/:taskId', async (req, res) => {
     try {
       const task = taskOrchestrator.getTask(req.params.taskId);
@@ -138,6 +139,7 @@ async function main() {
     }
   });
 
+  // Get all tasks
   app.get('/api/tasks', async (req, res) => {
     try {
       const { status, type, priority } = req.query;
@@ -155,6 +157,54 @@ async function main() {
     }
   });
 
+  // Get orchestrator stats
+  app.get('/api/stats', async (req, res) => {
+    try {
+      const stats = taskOrchestrator.getStats();
+      res.json({ stats });
+    } catch (error) {
+      logger.error('Failed to get stats', error);
+      res.status(500).json({ 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+    }
+  });
+
+  // Get agent health
+  app.get('/api/agents', async (req, res) => {
+    try {
+      const agents = agentRegistry.getAllAgents().map(agent => ({
+        id: agent.config.id,
+        name: agent.config.name,
+        provider: agent.config.provider,
+        status: agent.getStatus(),
+        capabilities: agent.getCapabilities()
+      }));
+      res.json({ agents });
+    } catch (error) {
+      logger.error('Failed to get agents', error);
+      res.status(500).json({ 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+    }
+  });
+
+  app.post('/api/tasks/:id/collaborate', async (req, res) => {
+    try {
+      const task = taskOrchestrator.getTask(req.params.id);
+      if (!task) {
+        return res.status(404).json({ error: 'Task not found' });
+      }
+      
+      const result = await taskOrchestrator.executeTask(task.id, true);
+      res.json({ task, result });
+    } catch (error) {
+      logger.error('Collaboration execution failed', error);
+      res.status(500).json({ 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      });
+    }
+  });
 
   // Health check
   app.get('/api/health', (_req, res) => {
