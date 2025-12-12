@@ -46,8 +46,10 @@ async function main() {
   const httpServer = createServer(app);
   const port = process.env.PORT || 3000;
 
+  const mcp_port = Number(process.env.MCP_PORT) || 3000;
+
   const communicationHub = new CommunicationHubImplementation();
-  await communicationHub.initialize(4000);
+  await communicationHub.initialize(mcp_port);
 
   const agentRegistry = new AgentRegistry();
   const configPath = path.join(__dirname, '../config/agents.yaml');
