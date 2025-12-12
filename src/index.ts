@@ -223,6 +223,13 @@ async function main() {
   
   process.on('SIGTERM', async () => {
     logger.info('SIGTERM received, shutting down gracefully');
+    
+    const agents = agentRegistry.getAllAgents();
+    for (const agent of agents) {
+      await agent.shutdown();
+    }
+    
+    await communicationHub.shutdown();
     await db.close();
     httpServer.close();
     process.exit(0);
