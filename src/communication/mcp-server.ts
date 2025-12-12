@@ -50,5 +50,107 @@ export class MCPServerImplementation implements MCPServer {
         methods: ['GET', 'POST']
       }
     });
+
+    this.setupMiddleware();
+    this.setupRoutes();
+    this.setupSocketHandlers();
   }
+
+
+  private setupMiddleware(): void {
+    this.app.use(express.json());
+    this.app.use((req, res, next) => {
+      const authHeader = req.headers.authorization;
+      if (!authHeader || authHeader !== `Bearer ${this.secretKey}`) {
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+      next();
+    });
+  }
+
+  private setupRoutes(): void {
+    this.app.get('/tools', (req: Request, res: Response) => {
+      const toolList = Array.from(this.tools.values()).map(tool => ({
+        name: tool.name,
+        description: tool.description,
+        inputSchema: tool.inputSchema,
+        outputSchema: tool.outputSchema
+      }));
+      res.json({ tools: toolList });
+    });
+
+    this.app.post('/tools/:toolName/execute', async (req: Request, res: Response) => {
+      const { toolName } = req.params;
+      const { input, requestId } = req.body;
+
+      const tool = this.tools.get(toolName);
+      if (!tool) {
+        return res.status(404).json({ error: 'Tool not found' });
+      }
+
+      try {
+        const result = await tool.handler(input);
+        res.json({
+          requestId,
+          toolName,
+          result,
+          success: true
+        });
+      } catch (error) {
+        this.logger.error(`Tool execution failed: ${toolName}`, error);
+        res.status(500).json({
+          requestId,
+          toolName,
+          error: error instanceof Error ? error.message : 'Unknown error',
+          success: false
+        });
+      }
+    });
+
+    this.app.get('/health', (req: Request, res: Response) => {
+      res.json({
+        status: 'healthy',
+        serverId: this.id,
+        serverName: this.name,
+        toolsCount: this.tools.size,
+        uptime: process.uptime()
+      });
+    });
+  }
+
+  private setupSocketHandlers(): void {
+    this.io.use((socket, next) => {
+      const token = socket.handshake.auth.token;
+      if (token !== this.secretKey) {
+        return next(new Error('Authentication failed'));
+      }
+      next();
+    });
+
+    this.io.on('connection', (socket) => {
+      this.logger.info(`Client connected: ${socket.id}`);
+
+      socket.on('subscribe', (event: string) => {
+        socket.join(event);
+        this.logger.info(`Client ${socket.id} subscribed to ${event}`);
+      });
+
+      socket.on('unsubscribe', (event: string) => {
+        socket.leave(event);
+        this.logger.info(`Client ${socket.id} unsubscribed from ${event}`);
+      });
+
+      socket.on('broadcast', (message: Message) => {
+        this.io.to(message.type).emit('message', message);
+        this.eventEmitter.emit('message', message);
+      });
+
+      socket.on('disconnect', () => {
+        this.logger.info(`Client disconnected: ${socket.id}`);
+      });
+    });
+  }
+  
+
+
 }
