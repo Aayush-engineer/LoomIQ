@@ -26,7 +26,6 @@ import { RepositoryIntegration } from './entities/RepositoryIntegration';
 import { WebhookEvent } from './entities/WebhookEvent';
 
 
-
 export const AppDataSource = new DataSource({
   type: 'postgres',
   host: process.env.DB_HOST || 'localhost',
