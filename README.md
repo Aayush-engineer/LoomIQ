@@ -1328,30 +1328,6 @@ npm run test:coverage
 - **Audit Logging**: Complete task history with timestamps and user tracking
 - **CORS Configuration**: Whitelist trusted origins only
 
----
-
-## 📈 Roadmap
-
-### **Q1 2024**
-- [x] Core orchestration engine
-- [x] Groq and Mistral integration
-- [x] Sequential/Parallel/Consensus strategies
-- [ ] Web dashboard UI
-
-### **Q2 2024**
-- [ ] OpenAI and Anthropic Claude support
-- [ ] Hierarchical collaboration strategy
-- [ ] Advanced cost optimization
-- [ ] Prometheus metrics exporter
-
-### **Q3 2024**
-- [ ] Multi-tenancy support
-- [ ] Custom agent training pipeline
-- [ ] GraphQL API
-- [ ] Enterprise SSO integration
-
----
-
 ## 🤝 Contributing
 
 We welcome contributions! Loomiq is built to be extensible and community-driven.
@@ -1636,3 +1612,4 @@ This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) 
 [⬆ Back to Top](#-loomiq---multi-agent-ai-orchestration-platform)
 
 </div>
+
