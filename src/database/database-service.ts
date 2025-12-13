@@ -6,7 +6,6 @@ import { TaskRepository } from './repositories/TaskRepository';
 import { Organization } from './entities/Organization';
 import { Role } from './entities/Role';
 import { Agent } from './entities/Agent';
-import { Project } from './entities/Project';
 import { SYSTEM_ROLES } from '../services/auth-service';
 
 export class DatabaseService {

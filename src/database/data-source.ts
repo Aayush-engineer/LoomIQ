@@ -25,7 +25,6 @@ import { AutomationRule } from './entities/AutomationRule';
 import { RepositoryIntegration } from './entities/RepositoryIntegration';
 import { WebhookEvent } from './entities/WebhookEvent';
 
-
 export const AppDataSource = new DataSource({
   type: 'postgres',
   host: process.env.DB_HOST || 'localhost',
@@ -33,7 +32,7 @@ export const AppDataSource = new DataSource({
   username: process.env.DB_USERNAME || 'postgres',
   password: process.env.DB_PASSWORD || 'postgres',
   database: process.env.DB_NAME || 'orchestrator',
-  synchronize: process.env.NODE_ENV === 'development',
+  synchronize: process.env.NODE_ENV !== 'production', // Changed this!
   logging: process.env.DB_LOGGING === 'true',
   entities: [
     Organization,
@@ -59,8 +58,9 @@ export const AppDataSource = new DataSource({
     AutomationRule,
     RepositoryIntegration,
   ],
-  migrations: ['src/database/migrations/*.ts'],
-  subscribers: ['src/database/subscribers/*.ts'],
+  // Use __dirname to work in both dev and production
+  migrations: [__dirname + '/migrations/*{.ts,.js}'],
+  subscribers: [__dirname + '/subscribers/*{.ts,.js}'],
   ssl: process.env.DB_SSL === 'true' ? {
     rejectUnauthorized: false
   } : false,
