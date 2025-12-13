@@ -1,36 +1,77 @@
 import { EventEmitter } from 'events';
 import { v4 as uuidv4 } from 'uuid';
-import { Agent, AgentRequest } from '../interfaces/agent.interface';
+import { Agent, AgentRequest, AgentResponse } from '../interfaces/agent.interface';
 import { Task } from '../interfaces/task.interface';
 import { AgentRegistry } from '../agents/agent-registry';
 import { CommunicationHubImplementation } from '../communication/communication-hub';
 import winston from 'winston';
 
-
 export interface CollaborationSession {
   id: string;
   taskId: string;
   agents: string[];
-  strategy: CollaborationStrategy['type'];
-  status: 'planning' | 'executing' | 'completed' | 'failed';
+  lead: string;
+  status: 'planning' | 'executing' | 'reviewing' | 'completed' | 'failed';
+  context: CollaborationContext;
+  plan: CollaborationPlan;
   results: CollaborationResult[];
   createdAt: Date;
   completedAt?: Date;
 }
 
+interface Subtask {
+  name: string;
+  description: string;
+  outputs: string[];
+}
+
+interface Phase {
+  name: string;
+  description: string;
+  outputs: string[];
+}
+
+
+
+export interface CollaborationContext {
+  task: Task;
+  sharedMemory: Map<string, any>;
+  dependencies: Map<string, string[]>;
+  constraints: string[];
+  objectives: string[];
+}
+
+export interface CollaborationPlan {
+  steps: CollaborationStep[];
+  dependencies: Map<string, string[]>;
+  estimatedDuration: number;
+}
+
+export interface CollaborationStep {
+  id: string;
+  name: string;
+  description: string;
+  assignedAgent: string;
+  dependencies: string[];
+  inputs: Record<string, any>;
+  expectedOutputs: string[];
+  status: 'pending' | 'in_progress' | 'completed' | 'failed';
+  result?: any;
+  error?: string;
+}
+
 export interface CollaborationResult {
+  stepId: string;
   agentId: string;
-  agentName: string;
   output: any;
   duration: number;
   timestamp: Date;
 }
 
 export interface CollaborationStrategy {
-  type: 'sequential' | 'parallel' | 'hierarchical' | 'consensus'; 
-  config?: Record<string, any>;
+  type: 'sequential' | 'parallel' | 'hierarchical' | 'consensus';
+  config: Record<string, any>;
 }
-
 
 export class CollaborationManager extends EventEmitter {
   private sessions: Map<string, CollaborationSession> = new Map();
@@ -51,9 +92,11 @@ export class CollaborationManager extends EventEmitter {
         })
       ]
     });
+
     this.setupCommunicationHandlers();
   }
-private setupCommunicationHandlers(): void {
+
+  private setupCommunicationHandlers(): void {
     // Listen for agent collaboration requests
     this.communicationHub.on('collaboration:request', (data) => {
       this.handleCollaborationRequest(data);
@@ -65,34 +108,42 @@ private setupCommunicationHandlers(): void {
     });
   }
 
-  // ============================================
-  // CORE COLLABORATION METHODS
-  // ============================================
-
   public async createCollaborationSession(
     task: Task,
-    strategy: CollaborationStrategy = { type: 'sequential' }
+    strategy: CollaborationStrategy = { type: 'sequential', config: {} }
   ): Promise<CollaborationSession> {
-    
-    // Select best agents for this task
-    const selectedAgents = await this.selectAgentsForTask(task, strategy);
-    
-    if (selectedAgents.length < 2) {
-      throw new Error('Need at least 2 agents for collaboration');
-    }
-
     const session: CollaborationSession = {
       id: uuidv4(),
       taskId: task.id,
-      agents: selectedAgents.map(a => a.id),
-      strategy: strategy.type,
+      agents: [],
+      lead: '',
       status: 'planning',
+      context: {
+        task,
+        sharedMemory: new Map(),
+        dependencies: new Map(),
+        constraints: [],
+        objectives: this.extractObjectives(task)
+      },
+      plan: {
+        steps: [],
+        dependencies: new Map(),
+        estimatedDuration: 0
+      },
       results: [],
       createdAt: new Date()
     };
 
+    // Select agents for collaboration
+    const selectedAgents = await this.selectAgentsForCollaboration(task, strategy);
+    session.agents = selectedAgents.map(a => a.id);
+    session.lead = this.selectLeadAgent(selectedAgents, task);
+
+    // Create collaboration plan
+    session.plan = await this.createCollaborationPlan(task, selectedAgents, strategy);
+
     this.sessions.set(session.id, session);
-    this.logger.info(`🤝 Created ${strategy.type} collaboration session ${session.id}`);
+    this.logger.info(`Created collaboration session ${session.id} for task ${task.id}`);
     this.emit('session:created', session);
 
     return session;
@@ -108,316 +159,784 @@ private setupCommunicationHandlers(): void {
     this.emit('session:started', session);
 
     try {
-      let results: CollaborationResult[];
-
-      // Execute based on strategy
-      switch (session.strategy) {
-        case 'sequential':
-          results = await this.executeSequential(session);
-          break;
-        case 'parallel':
-          results = await this.executeParallel(session);
-          break;
-        case 'consensus':
-          results = await this.executeConsensus(session);
-          break;
-        default:
-          throw new Error(`Unknown strategy: ${session.strategy}`);
-      }
-
+      const results = await this.executeCollaborationPlan(session);
+      
+      session.status = 'reviewing';
+      const reviewedResults = await this.reviewResults(session, results);
+      
+      session.results = reviewedResults;
       session.status = 'completed';
-      session.results = results;
       session.completedAt = new Date();
       
-      this.logger.info(`✅ Collaboration session ${sessionId} completed`);
+      this.logger.info(`Collaboration session ${sessionId} completed successfully`);
       this.emit('session:completed', session);
       
-      return results;
-
+      return reviewedResults;
     } catch (error) {
       session.status = 'failed';
-      this.logger.error(`❌ Collaboration session ${sessionId} failed:`, error);
+      this.logger.error(`Collaboration session ${sessionId} failed:`, error);
       this.emit('session:failed', { session, error });
       throw error;
     }
   }
 
-  
-  // COLLABORATION STRATEGIES
-  
-  private async executeSequential(session: CollaborationSession): Promise<CollaborationResult[]> {
-    this.logger.info(`🔄 Executing sequential collaboration`);
-    
-    const task = await this.getTask(session.taskId);
-    const results: CollaborationResult[] = [];
-    let previousResult: any = null;
 
-    for (let i = 0; i < session.agents.length; i++) {
-      const agentId = session.agents[i];
-      const agent = this.agentRegistry.getAgent(agentId);
-      
-      if (!agent) {
-        this.logger.warn(`Agent ${agentId} not found, skipping`);
-        continue;
-      }
 
-      const role = i === 0 ? 'initiator' : 'reviewer';
-      const prompt = this.buildSequentialPrompt(task, role, previousResult);
 
-      this.logger.info(`👤 Agent ${agent.config.name} working (${role})...`);
-      this.emit('step:started', { 
-        session, 
-        step: { name: `${role} - ${agent.config.name}`, assignedAgent: agentId } 
-      });
 
-      const startTime = Date.now();
-      
-      const request: AgentRequest = {
-        taskId: session.taskId,
-        prompt: prompt,
-        context: {
-          collaborationSession: session.id,
-          role: role,
-          previousResult: previousResult
-        },
-        priority: 'high'
-      };
 
-      const response = await agent.execute(request);
-      
-      if (response.success) {
-        const result: CollaborationResult = {
-          agentId: agent.id,
-          agentName: agent.config.name,
-          output: response.result,
-          duration: Date.now() - startTime,
-          timestamp: new Date()
-        };
 
-        results.push(result);
-        previousResult = response.result;
-
-        this.logger.info(`✅ Agent ${agent.config.name} completed`);
-        this.emit('step:completed', { session, step: { name: role }, result });
-      } else {
-        this.logger.error(`Agent ${agent.config.name} failed: ${response.error}`);
-      }
-    }
-
-    return results;
-  }
-
-  private async executeParallel(session: CollaborationSession): Promise<CollaborationResult[]> {
-    this.logger.info(`⚡ Executing parallel collaboration`);
-    
-    const task = await this.getTask(session.taskId);
-    const results: CollaborationResult[] = [];
-
-    // All agents work simultaneously on the same task
-    const agentPromises = session.agents.map(async (agentId) => {
-      const agent = this.agentRegistry.getAgent(agentId);
-      if (!agent) return null;
-
-      this.logger.info(`👤 Agent ${agent.config.name} working in parallel...`);
-      this.emit('step:started', { 
-        session, 
-        step: { name: `Parallel - ${agent.config.name}`, assignedAgent: agentId } 
-      });
-
-      const startTime = Date.now();
-
-      const request: AgentRequest = {
-        taskId: session.taskId,
-        prompt: `${task.description}\n\nProvide your independent solution to this task.`,
-        context: {
-          collaborationSession: session.id,
-          mode: 'parallel'
-        },
-        priority: 'high'
-      };
-
-      const response = await agent.execute(request);
-
-      if (response.success) {
-        return {
-          agentId: agent.id,
-          agentName: agent.config.name,
-          output: response.result,
-          duration: Date.now() - startTime,
-          timestamp: new Date()
-        };
-      }
-      return null;
-    });
-
-    const parallelResults = await Promise.all(agentPromises);
-    
-    // Filter out nulls and add to results
-    for (const result of parallelResults) {
-      if (result) {
-        results.push(result);
-        this.emit('step:completed', { session, step: { name: 'parallel' }, result });
-      }
-    }
-
-    return results;
-  }
-
-  private async executeConsensus(session: CollaborationSession): Promise<CollaborationResult[]> {
-    this.logger.info(`🗳️ Executing consensus collaboration`);
-    
-    const task = await this.getTask(session.taskId);
-    const results: CollaborationResult[] = [];
-
-    // Phase 1: All agents provide their analysis
-    const analyses: CollaborationResult[] = [];
-    
-    for (const agentId of session.agents) {
-      const agent = this.agentRegistry.getAgent(agentId);
-      if (!agent) continue;
-
-      this.logger.info(`👤 Agent ${agent.config.name} analyzing...`);
-      
-      const startTime = Date.now();
-      const request: AgentRequest = {
-        taskId: session.taskId,
-        prompt: `${task.description}\n\nProvide your analysis and proposed approach.`,
-        context: { mode: 'analysis' },
-        priority: 'high'
-      };
-
-      const response = await agent.execute(request);
-      
-      if (response.success) {
-        analyses.push({
-          agentId: agent.id,
-          agentName: agent.config.name,
-          output: response.result,
-          duration: Date.now() - startTime,
-          timestamp: new Date()
-        });
-      }
-    }
-
-    results.push(...analyses);
-
-    // Phase 2: Lead agent builds consensus
-    const leadAgent = this.agentRegistry.getAgent(session.agents[0]);
-    if (leadAgent) {
-      this.logger.info(`🤔 Building consensus...`);
-      
-      const consensusPrompt = this.buildConsensusPrompt(task, analyses);
-      const startTime = Date.now();
-
-      const request: AgentRequest = {
-        taskId: session.taskId,
-        prompt: consensusPrompt,
-        context: { mode: 'consensus', analyses },
-        priority: 'high'
-      };
-
-      const response = await leadAgent.execute(request);
-      
-      if (response.success) {
-        results.push({
-          agentId: leadAgent.id,
-          agentName: `${leadAgent.config.name} (Consensus)`,
-          output: response.result,
-          duration: Date.now() - startTime,
-          timestamp: new Date()
-        });
-      }
-    }
-
-    return results;
-  }
-
-  private async selectAgentsForTask(
-    task: Task, 
+  private async selectAgentsForCollaboration(
+    task: Task,
     strategy: CollaborationStrategy
   ): Promise<Agent[]> {
-    // Get agents best suited for this task
-    const agentScores = this.agentRegistry.findBestAgentForTask(task);
+    const agents: Agent[] = [];
     
-    // Select top 2-3 agents based on strategy
-    const numAgents = strategy.type === 'consensus' ? 3 : 2;
-    const selectedIds = agentScores.slice(0, numAgents).map(s => s.agentId);
+    // Get all available agents
+    const availableAgents = this.agentRegistry.getAvailableAgents();
     
-    const agents = selectedIds
-      .map(id => this.agentRegistry.getAgent(id))
-      .filter(agent => agent !== undefined) as Agent[];
+    if (availableAgents.length === 0) {
+      throw new Error('No agents available in the system');
+    }
+
+    this.logger.info(`Found ${availableAgents.length} available agents`);
+
+    // ✅ STEP 1: Try to find agents by capability NAME
+    const requiredCapabilities = this.identifyRequiredCapabilities(task);
+    
+    for (const capability of requiredCapabilities) {
+      const capableAgents = this.agentRegistry.getAgentsByCapability(capability);
+      
+      if (capableAgents.length > 0) {
+        this.logger.info(`Found ${capableAgents.length} agents for capability: ${capability}`);
+        
+        const scores = capableAgents.map(agent => ({
+          agent,
+          score: this.calculateAgentScore(agent, task, capability)
+        }));
+        
+        scores.sort((a, b) => b.score - a.score);
+        
+        const topAgent = scores[0].agent;
+        if (!agents.find(a => a.id === topAgent.id)) {
+          agents.push(topAgent);
+        }
+      }
+    }
+
+    // ✅ STEP 2: If no capability match, try by CATEGORY
+    if (agents.length === 0) {
+      this.logger.warn('No agents found by capability name, trying by category...');
+      
+      const category = this.getTaskCategory(task.type);
+      const categoryAgents = availableAgents.filter(agent => 
+        agent.capabilities.some(cap => cap.category === category)
+      );
+      
+      if (categoryAgents.length > 0) {
+        this.logger.info(`Found ${categoryAgents.length} agents for category: ${category}`);
+        agents.push(...categoryAgents);
+      }
+    }
+
+    // ✅ STEP 3: Ultimate fallback - use ALL available agents
+    if (agents.length === 0) {
+      this.logger.warn('No agents matched by capability or category, using all available agents');
+      agents.push(...availableAgents);
+    }
+
+    // ✅ STEP 4: For collaboration, ensure at least 2 agents
+    if (agents.length === 1 && availableAgents.length >= 2) {
+      this.logger.info('Only 1 agent selected, adding second agent for collaboration');
+      const secondAgent = availableAgents.find(a => a.id !== agents[0].id);
+      if (secondAgent) {
+        agents.push(secondAgent);
+      }
+    }
+
+    // ✅ STEP 5: For consensus, need at least 3 (but you only have 2)
+    if (strategy.type === 'consensus') {
+      if (agents.length < 3 && availableAgents.length < 3) {
+        this.logger.warn('Consensus requires 3+ agents but only have 2. Switching to sequential.');
+        strategy.type = 'sequential';
+      } else if (agents.length < 3) {
+        const additionalAgents = availableAgents
+          .filter(a => !agents.find(existing => existing.id === a.id))
+          .slice(0, 3 - agents.length);
+        agents.push(...additionalAgents);
+      }
+    }
+
+    this.logger.info(`✅ Selected ${agents.length} agents: ${agents.map(a => a.config.name).join(', ')}`);
 
     return agents;
   }
 
-  private buildSequentialPrompt(task: Task, role: string, previousResult: any): string {
-    if (role === 'initiator') {
-      return `${task.description}\n\nYou are the first agent. Provide your initial solution.`;
-    } else {
-      return `${task.description}
 
-Previous agent's work:
-${JSON.stringify(previousResult, null, 2)}
+  private getTaskCategory(taskType: Task['type']): string {
+    // Map task types to capability categories from your agents.yaml
+    const categoryMap: Record<string, string> = {
+      'implementation': 'implementation',
+      'design': 'planning',
+      'requirement': 'planning',
+      'test': 'test',
+      'deployment': 'implementation',
+      'planning': 'planning',
+      'review': 'test'
+    };
+    
+    return categoryMap[taskType] || 'general';
+  }
 
-Review and improve the previous work. Provide:
-1. What works well
-2. What could be improved
-3. Your improved version`;
+
+  
+
+
+
+
+
+  private selectLeadAgent(agents: Agent[], task: Task): string {
+    // Select lead based on experience and capabilities
+    let bestAgent = agents[0];
+    let bestScore = 0;
+
+    for (const agent of agents) {
+      const score = this.calculateLeadershipScore(agent, task);
+      if (score > bestScore) {
+        bestScore = score;
+        bestAgent = agent;
+      }
+    }
+
+    return bestAgent.id;
+  }
+
+  private async createCollaborationPlan(
+    task: Task,
+    agents: Agent[],
+    strategy: CollaborationStrategy
+  ): Promise<CollaborationPlan> {
+    const plan: CollaborationPlan = {
+      steps: [],
+      dependencies: new Map(),
+      estimatedDuration: 0
+    };
+
+    switch (strategy.type) {
+      case 'sequential':
+        plan.steps = this.createSequentialPlan(task, agents);
+        break;
+      
+      case 'parallel':
+        plan.steps = this.createParallelPlan(task, agents);
+        break;
+      
+      case 'hierarchical':
+        plan.steps = this.createHierarchicalPlan(task, agents);
+        break;
+      
+      case 'consensus':
+        plan.steps = this.createConsensusPlan(task, agents);
+        break;
+    }
+
+    // Calculate dependencies
+    for (const step of plan.steps) {
+      if (step.dependencies.length > 0) {
+        plan.dependencies.set(step.id, step.dependencies);
+      }
+    }
+
+    // Estimate duration
+    plan.estimatedDuration = this.estimatePlanDuration(plan);
+
+    return plan;
+  }
+
+  private createSequentialPlan(task: Task, agents: Agent[]): CollaborationStep[] {
+    const steps: CollaborationStep[] = [];
+    const taskPhases = this.identifyTaskPhases(task);
+
+    let previousStepId: string | null = null;
+    
+    for (let i = 0; i < taskPhases.length; i++) {
+      const phase = taskPhases[i];
+      const agent = agents[i % agents.length];
+      
+      const step: CollaborationStep = {
+        id: uuidv4(),
+        name: phase.name,
+        description: phase.description,
+        assignedAgent: agent.id,
+        dependencies: previousStepId ? [previousStepId] : [],
+        inputs: {
+          taskContext: task,
+          phase: phase,
+          previousResults: previousStepId ? `{{${previousStepId}.output}}` : null
+        },
+        expectedOutputs: phase.outputs,
+        status: 'pending'
+      };
+      
+      steps.push(step);
+      previousStepId = step.id;
+    }
+
+    return steps;
+  }
+
+  private createParallelPlan(task: Task, agents: Agent[]): CollaborationStep[] {
+    const steps: CollaborationStep[] = [];
+    const subtasks = this.decomposeTaskForParallel(task);
+
+    // Create parallel execution steps
+    for (let i = 0; i < subtasks.length; i++) {
+      const subtask = subtasks[i];
+      const agent = agents[i % agents.length];
+      
+      steps.push({
+        id: uuidv4(),
+        name: `Parallel: ${subtask.name}`,
+        description: subtask.description,
+        assignedAgent: agent.id,
+        dependencies: [],
+        inputs: {
+          taskContext: task,
+          subtask: subtask
+        },
+        expectedOutputs: subtask.outputs,
+        status: 'pending'
+      });
+    }
+
+    // Add aggregation step
+    const leadAgent = agents.find(a => a.id === agents[0].id)!;
+    steps.push({
+      id: uuidv4(),
+      name: 'Aggregate Results',
+      description: 'Combine and synthesize parallel execution results',
+      assignedAgent: leadAgent.id,
+      dependencies: steps.map(s => s.id),
+      inputs: {
+        parallelResults: steps.map(s => `{{${s.id}.output}}`)
+      },
+      expectedOutputs: ['aggregated_result', 'synthesis'],
+      status: 'pending'
+    });
+
+    return steps;
+  }
+
+  private createHierarchicalPlan(task: Task, agents: Agent[]): CollaborationStep[] {
+    const steps: CollaborationStep[] = [];
+    
+    // Lead agent creates high-level plan
+    const leadAgent = agents[0];
+    const planningStep: CollaborationStep = {
+      id: uuidv4(),
+      name: 'Create Execution Plan',
+      description: 'Lead agent creates detailed execution plan',
+      assignedAgent: leadAgent.id,
+      dependencies: [],
+      inputs: { task },
+      expectedOutputs: ['execution_plan', 'task_assignments'],
+      status: 'pending'
+    };
+    steps.push(planningStep);
+
+    // Worker agents execute assigned tasks
+    for (let i = 1; i < agents.length; i++) {
+      const workerStep: CollaborationStep = {
+        id: uuidv4(),
+        name: `Execute Assigned Tasks - Worker ${i}`,
+        description: 'Execute tasks assigned by lead agent',
+        assignedAgent: agents[i].id,
+        dependencies: [planningStep.id],
+        inputs: {
+          assignments: `{{${planningStep.id}.task_assignments[${i-1}]}}`
+        },
+        expectedOutputs: ['task_results'],
+        status: 'pending'
+      };
+      steps.push(workerStep);
+    }
+
+    // Lead agent reviews and integrates
+    const reviewStep: CollaborationStep = {
+      id: uuidv4(),
+      name: 'Review and Integrate',
+      description: 'Lead agent reviews and integrates all results',
+      assignedAgent: leadAgent.id,
+      dependencies: steps.slice(1).map(s => s.id),
+      inputs: {
+        workerResults: steps.slice(1).map(s => `{{${s.id}.output}}`)
+      },
+      expectedOutputs: ['final_result', 'quality_report'],
+      status: 'pending'
+    };
+    steps.push(reviewStep);
+
+    return steps;
+  }
+
+  private createConsensusPlan(task: Task, agents: Agent[]): CollaborationStep[] {
+    const steps: CollaborationStep[] = [];
+    
+    // Each agent independently analyzes the task
+    const analysisSteps = agents.map(agent => ({
+      id: uuidv4(),
+      name: `Independent Analysis - ${agent.name}`,
+      description: 'Analyze task and propose solution',
+      assignedAgent: agent.id,
+      dependencies: [],
+      inputs: { task },
+      expectedOutputs: ['analysis', 'proposed_solution'],
+      status: 'pending' as const
+    }));
+    steps.push(...analysisSteps);
+
+    // Consensus building step
+    const consensusStep: CollaborationStep = {
+      id: uuidv4(),
+      name: 'Build Consensus',
+      description: 'Agents discuss and reach consensus on approach',
+      assignedAgent: agents[0].id, // Lead facilitates
+      dependencies: analysisSteps.map(s => s.id),
+      inputs: {
+        proposals: analysisSteps.map(s => `{{${s.id}.proposed_solution}}`)
+      },
+      expectedOutputs: ['consensus_approach', 'dissenting_opinions'],
+      status: 'pending'
+    };
+    steps.push(consensusStep);
+
+    // Execute consensus approach
+    const executionStep: CollaborationStep = {
+      id: uuidv4(),
+      name: 'Execute Consensus Approach',
+      description: 'Implement the agreed-upon solution',
+      assignedAgent: agents[1].id, // Different agent executes
+      dependencies: [consensusStep.id],
+      inputs: {
+        approach: `{{${consensusStep.id}.consensus_approach}}`
+      },
+      expectedOutputs: ['implementation', 'results'],
+      status: 'pending'
+    };
+    steps.push(executionStep);
+
+    return steps;
+  }
+
+  private async executeCollaborationPlan(session: CollaborationSession): Promise<CollaborationResult[]> {
+    const results: CollaborationResult[] = [];
+    const { plan } = session;
+
+    // Execute steps based on dependencies
+    const executed = new Set<string>();
+    
+    while (executed.size < plan.steps.length) {
+      const readySteps = plan.steps.filter(step => 
+        !executed.has(step.id) &&
+        step.dependencies.every(dep => executed.has(dep))
+      );
+
+      if (readySteps.length === 0) {
+        throw new Error('Circular dependency detected in collaboration plan');
+      }
+
+      // Execute ready steps in parallel
+      const stepResults = await Promise.all(
+        readySteps.map(step => this.executeCollaborationStep(session, step))
+      );
+
+      for (const result of stepResults) {
+        results.push(result);
+        executed.add(result.stepId);
+      }
+    }
+
+    return results;
+  }
+
+  private async executeCollaborationStep(
+    session: CollaborationSession,
+    step: CollaborationStep
+  ): Promise<CollaborationResult> {
+    const agent = this.agentRegistry.getAgent(step.assignedAgent);
+    if (!agent) {
+      throw new Error(`Agent ${step.assignedAgent} not found`);
+    }
+
+    step.status = 'in_progress';
+    this.emit('step:started', { session, step });
+
+    const startTime = Date.now();
+
+    try {
+      // Resolve input references
+      const resolvedInputs = this.resolveInputReferences(step.inputs, session);
+
+      // Create agent request
+      const request: AgentRequest = {
+        taskId: session.taskId,
+        prompt: this.createStepPrompt(step, resolvedInputs),
+        context: {
+          collaborationSession: session.id,
+          step: step,
+          inputs: resolvedInputs,
+          sharedMemory: Object.fromEntries(session.context.sharedMemory)
+        },
+        priority: session.context.task.priority
+      };
+
+      // Execute via agent
+      const response = await agent.execute(request);
+
+      if (!response.success) {
+        throw new Error(response.error || 'Agent execution failed');
+      }
+
+      step.status = 'completed';
+      step.result = response.result;
+
+      // Update shared memory
+      if (response.result && typeof response.result === 'object') {
+        for (const output of step.expectedOutputs) {
+          if (response.result[output]) {
+            session.context.sharedMemory.set(
+              `${step.id}.${output}`,
+              response.result[output]
+            );
+          }
+        }
+      }
+
+      const result: CollaborationResult = {
+        stepId: step.id,
+        agentId: agent.id,
+        output: response.result,
+        duration: Date.now() - startTime,
+        timestamp: new Date()
+      };
+
+      this.emit('step:completed', { session, step, result });
+      return result;
+
+    } catch (error) {
+      step.status = 'failed';
+      step.error = error instanceof Error ? error.message : 'Unknown error';
+      
+      this.emit('step:failed', { session, step, error });
+      throw error;
     }
   }
 
-  private buildConsensusPrompt(task: Task, analyses: CollaborationResult[]): string {
-    const analysesText = analyses.map((a, i) => 
-      `Agent ${i + 1} (${a.agentName}):
-${JSON.stringify(a.output, null, 2)}
-`
-    ).join('\n\n');
+  private async reviewResults(
+    session: CollaborationSession,
+    results: CollaborationResult[]
+  ): Promise<CollaborationResult[]> {
+    // Lead agent reviews all results
+    const leadAgent = this.agentRegistry.getAgent(session.lead);
+    if (!leadAgent) {
+      return results; // Skip review if lead not available
+    }
 
-    return `${task.description}
+    const reviewRequest: AgentRequest = {
+      taskId: session.taskId,
+      prompt: `Review the collaboration results for task: ${session.context.task.description}
+      
+Objectives:
+${session.context.objectives.map(o => `- ${o}`).join('\n')}
 
-Multiple agents have analyzed this task. Here are their perspectives:
+Results from collaboration:
+${JSON.stringify(results, null, 2)}
 
-${analysesText}
-
-Build a consensus solution that:
-1. Incorporates the best ideas from each analysis
-2. Addresses any conflicts between approaches
-3. Provides a unified, coherent solution`;
-  }
-
-  private async getTask(taskId: string): Promise<Task> {
-    // In real implementation, fetch from task orchestrator
-    // For now, return a minimal task object
-    return {
-      id: taskId,
-      description: 'Task description',
-      type: 'implementation',
-      status: 'in_progress'
-    } as Task;
-  }
-
-
-  public getSession(sessionId: string): CollaborationSession | undefined {
-    return this.sessions.get(sessionId);
-  }
-
-  public getAllSessions(): CollaborationSession[] {
-    return Array.from(this.sessions.values());
-  }
-
-  public getSessionStats() {
-    const sessions = Array.from(this.sessions.values());
-    return {
-      total: sessions.length,
-      completed: sessions.filter(s => s.status === 'completed').length,
-      failed: sessions.filter(s => s.status === 'failed').length,
-      active: sessions.filter(s => s.status === 'executing').length,
-      byStrategy: {
-        sequential: sessions.filter(s => s.strategy === 'sequential').length,
-        parallel: sessions.filter(s => s.strategy === 'parallel').length,
-        consensus: sessions.filter(s => s.strategy === 'consensus').length
-      }
+Please:
+1. Verify all objectives have been met
+2. Check for consistency across results
+3. Identify any issues or improvements
+4. Provide a final synthesized result`,
+      context: {
+        session,
+        results
+      },
+      priority: 'high'
     };
+
+    const reviewResponse = await leadAgent.execute(reviewRequest);
+    
+    if (reviewResponse.success && reviewResponse.result.approved) {
+      this.logger.info(`Collaboration results approved for session ${session.id}`);
+      return results;
+    } else {
+      // Handle review feedback
+      this.logger.warn(`Collaboration results require revision for session ${session.id}`);
+      // Could implement revision logic here
+      return results;
+    }
+  }
+
+  private identifyRequiredCapabilities(task: Task): string[] {
+    const capabilities: string[] = [];
+    
+    switch (task.type) {
+      case 'implementation':
+        capabilities.push('code-generation');
+        break;
+      case 'design':
+        capabilities.push('reasoning', 'documentation');
+        break;
+      case 'requirement':
+        capabilities.push('reasoning', 'documentation');
+        break;
+      case 'test':
+        capabilities.push('code-review');
+        break;
+      case 'deployment':
+        capabilities.push('code-generation', 'documentation');
+        break;
+      case 'review':
+        capabilities.push('code-review');
+        break;
+      default:
+        capabilities.push('code-generation', 'rapid-response');
+    }
+
+    const description = task.description.toLowerCase();
+    if (description.includes('code') || description.includes('python') || description.includes('javascript')) {
+      capabilities.push('code-generation');
+    }
+    if (description.includes('review') || description.includes('check') || description.includes('security')) {
+      capabilities.push('code-review');
+    }
+    if (description.includes('document') || description.includes('explain')) {
+      capabilities.push('documentation');
+    }
+    if (description.includes('translate') || description.includes('language')) {
+      capabilities.push('multilingual-support');
+    }
+    if (description.includes('analyze') || description.includes('plan') || description.includes('strategy')) {
+      capabilities.push('reasoning');
+    }
+
+    return [...new Set(capabilities)];
+  }
+
+  private calculateAgentScore(agent: Agent, task: Task, capability: string): number {
+    let score = 0;
+    
+    // Check if agent has the capability
+    const hasCapability = agent.capabilities.some(c => 
+      c.name === capability || c.category === task.type
+    );
+    if (hasCapability) score += 50;
+
+    // Consider agent performance
+    score += agent.status.successRate * 0.3;
+    
+    // Consider agent availability
+    if (agent.status.state === 'idle') score += 20;
+    
+    // Consider response time
+    const avgResponseTime = agent.status.averageResponseTime;
+    if (avgResponseTime < 5000) score += 10;
+    else if (avgResponseTime < 10000) score += 5;
+
+    return score;
+  }
+
+  private calculateLeadershipScore(agent: Agent, task: Task): number {
+    let score = 0;
+    
+    // Experience (completed tasks)
+    score += Math.min(agent.status.totalTasksCompleted * 0.1, 30);
+    
+    // Success rate
+    score += agent.status.successRate * 0.4;
+    
+    // Has planning/coordination capabilities
+    const hasLeadershipCaps = agent.capabilities.some(c => 
+      ['planning', 'coordination', 'analysis'].includes(c.name)
+    );
+    if (hasLeadershipCaps) score += 30;
+
+    return score;
+  }
+
+  private extractObjectives(task: Task): string[] {
+    const objectives: string[] = [];
+    
+    // Primary objective from task
+    objectives.push(`Complete ${task.type}: ${task.title}`);
+    
+    // Extract from description
+    const descriptionLines = task.description.split('\n');
+    descriptionLines.forEach(line => {
+      if (line.match(/^[-*]\s+/) || line.match(/^\d+\.\s+/)) {
+        objectives.push(line.replace(/^[-*\d.]\s+/, '').trim());
+      }
+    });
+
+    // Add quality objectives
+    objectives.push('Ensure high quality and maintainability');
+    objectives.push('Follow best practices and standards');
+    
+    return objectives;
+  }
+
+  private identifyTaskPhases(task: Task): Array<{
+    name: string;
+    description: string;
+    outputs: string[];
+  }> {
+    interface Phase {
+  name: string;
+  description: string;
+  outputs: string[];
+}
+
+    const phases: Phase[] = [];
+
+    // Standard phases based on task type
+    switch (task.type) {
+      case 'implementation':
+        phases.push(
+          { name: 'Analysis', description: 'Analyze requirements and approach', outputs: ['analysis', 'approach'] },
+          { name: 'Design', description: 'Design solution architecture', outputs: ['design', 'interfaces'] },
+          { name: 'Implementation', description: 'Implement the solution', outputs: ['code', 'documentation'] },
+          { name: 'Testing', description: 'Test the implementation', outputs: ['tests', 'test_results'] }
+        );
+        break;
+
+      case 'design':
+        phases.push(
+          { name: 'Research', description: 'Research requirements and constraints', outputs: ['research', 'constraints'] },
+          { name: 'Conceptualization', description: 'Create design concepts', outputs: ['concepts', 'alternatives'] },
+          { name: 'Refinement', description: 'Refine and finalize design', outputs: ['final_design', 'specifications'] }
+        );
+        break;
+
+      default:
+        phases.push(
+          { name: 'Planning', description: 'Plan approach', outputs: ['plan'] },
+          { name: 'Execution', description: 'Execute the task', outputs: ['result'] },
+          { name: 'Validation', description: 'Validate results', outputs: ['validation'] }
+        );
+    }
+
+    
+    return phases;
+  }
+
+  private decomposeTaskForParallel(task: Task): Array<{
+    name: string;
+    description: string;
+    outputs: string[];
+  }> {
+    // Simple decomposition - in practice, this would be more sophisticated
+    const subtasks: Subtask[] = [];
+    
+    // Look for enumerated items in description
+    const lines = task.description.split('\n');
+    let currentSubtask: Subtask | null = null;
+    
+    for (const line of lines) {
+      if (line.match(/^[-*]\s+/) || line.match(/^\d+\.\s+/)) {
+        if (currentSubtask) {
+          subtasks.push(currentSubtask);
+        }
+        currentSubtask = {
+          name: line.replace(/^[-*\d.]\s+/, '').trim(),
+          description: line,
+          outputs: ['result']
+        };
+      } else if (currentSubtask && line.trim()) {
+        currentSubtask.description += '\n' + line;
+      }
+    }
+    
+    if (currentSubtask) {
+      subtasks.push(currentSubtask);
+    }
+
+    
+    // If no subtasks found, create generic ones
+    if (subtasks.length === 0) {
+      subtasks.push(
+        {
+          name: 'Component A',
+          description: 'Handle first part of the task',
+          outputs: ['component_a_result'],
+        },
+        {
+          name: 'Component B',
+          description: 'Handle second part of the task',
+          outputs: ['component_b_result'],
+        }
+      );
+    }
+
+    
+    return subtasks;
+  }
+
+  private estimatePlanDuration(plan: CollaborationPlan): number {
+    // Simple estimation - sum of sequential steps, max of parallel
+    let totalDuration = 0;
+    const processed = new Set<string>();
+    
+    // Process in dependency order
+    while (processed.size < plan.steps.length) {
+      const readySteps = plan.steps.filter(step =>
+        !processed.has(step.id) &&
+        step.dependencies.every(dep => processed.has(dep))
+      );
+      
+      if (readySteps.length === 0) break;
+      
+      // Parallel steps take the max duration
+      const stepDuration = Math.max(...readySteps.map(() => 30000)); // 30s per step estimate
+      totalDuration += stepDuration;
+      
+      readySteps.forEach(step => processed.add(step.id));
+    }
+    
+    return totalDuration;
+  }
+
+  private resolveInputReferences(inputs: Record<string, any>, session: CollaborationSession): Record<string, any> {
+    const resolved: Record<string, any> = {};
+    
+    for (const [key, value] of Object.entries(inputs)) {
+      if (typeof value === 'string' && value.match(/\{\{(.+?)\}\}/)) {
+        // Resolve reference from shared memory
+        const ref = value.match(/\{\{(.+?)\}\}/)?.[1];
+        if (ref && session.context.sharedMemory.has(ref)) {
+          resolved[key] = session.context.sharedMemory.get(ref);
+        } else {
+          resolved[key] = value; // Keep original if not found
+        }
+      } else {
+        resolved[key] = value;
+      }
+    }
+    
+    return resolved;
+  }
+
+  private createStepPrompt(step: CollaborationStep, inputs: Record<string, any>): string {
+    return `${step.description}
+
+    Step: ${step.name}
+
+    Inputs:
+    ${JSON.stringify(inputs, null, 2)}
+
+    Expected outputs:
+    ${step.expectedOutputs.map(o => `- ${o}`).join('\n')}
+
+    Please complete this step and provide the expected outputs in your response.`;
   }
 
   private handleCollaborationRequest(data: any): void {
@@ -428,5 +947,13 @@ Build a consensus solution that:
   private handleCollaborationUpdate(data: any): void {
     // Handle collaboration updates from agents
     this.logger.info('Received collaboration update:', data);
+  }
+
+  public getSession(sessionId: string): CollaborationSession | undefined {
+    return this.sessions.get(sessionId);
+  }
+
+  public getAllSessions(): CollaborationSession[] {
+    return Array.from(this.sessions.values());
   }
 }

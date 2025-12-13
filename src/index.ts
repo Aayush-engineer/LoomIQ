@@ -45,11 +45,10 @@ async function main() {
   const app = express();
   const httpServer = createServer(app);
   const port = process.env.PORT || 3000;
-
-  const mcp_port = Number(process.env.MCP_PORT) || 3000;
+  
 
   const communicationHub = new CommunicationHubImplementation();
-  await communicationHub.initialize(mcp_port);
+  await communicationHub.initialize(4000);
 
   const agentRegistry = new AgentRegistry();
   const configPath = path.join(__dirname, '../config/agents.yaml');
@@ -103,13 +102,14 @@ async function main() {
         prompt,
         type: type || 'implementation',
         priority: priority || 'medium',
-        context,
-        useCollaboration
+        context
       });
 
-      console.log("this is my data comming from user",task);
+      
       
       const result = await taskOrchestrator.executeTask(task.id, useCollaboration);
+
+      console.log("my real result",result);
       
       res.json({ 
         success: true,

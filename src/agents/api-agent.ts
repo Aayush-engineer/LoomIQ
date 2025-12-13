@@ -80,6 +80,7 @@ export abstract class APIAgent extends BaseAgentImplementation {
   protected abstract validateCredentials(): Promise<void>;
 
   protected async onExecute(request: AgentRequest): Promise<any> {
+
     const apiRequest = this.buildAPIRequest(request);
     
     try {

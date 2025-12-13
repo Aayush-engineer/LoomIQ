@@ -2,7 +2,9 @@ import { EventEmitter } from 'events';
 import { v4 as uuidv4 } from 'uuid';
 import { AgentRegistry } from '../agents/agent-registry';
 import { CommunicationHubImplementation } from '../communication/communication-hub';
-import { Task } from '../interfaces/task.interface';
+import { 
+  Task
+} from '../interfaces/task.interface';
 import { AgentRequest } from '../interfaces/agent.interface';
 import { CollaborationManager, CollaborationStrategy } from '../collaboration/collaboration-manager';
 import winston from 'winston';
@@ -13,6 +15,7 @@ export class TaskOrchestrator extends EventEmitter {
   private runningTasks: Map<string, { agentId: string, startTime: Date }> = new Map();
   private logger: winston.Logger;
   private collaborationManager: CollaborationManager;
+  private taskProcessorInterval: NodeJS.Timeout | null = null;
 
   constructor(
     private agentRegistry: AgentRegistry,
@@ -29,24 +32,19 @@ export class TaskOrchestrator extends EventEmitter {
         })
       ]
     });
-
-    // Initialize collaboration manager
     this.collaborationManager = new CollaborationManager(agentRegistry, communicationHub);
     this.setupCollaborationHandlers();
+
+    this.startTaskProcessor();
   }
 
   private setupCollaborationHandlers(): void {
-    // Listen to collaboration events
     this.collaborationManager.on('session:completed', (session) => {
-      this.logger.info(`🎉 Collaboration session ${session.id} completed`);
+      this.logger.info(`Collaboration session ${session.id} completed for task ${session.taskId}`);
       
       const task = this.tasks.get(session.taskId);
       if (task && session.results.length > 0) {
-        task.output = {
-          collaborationResults: session.results,
-          sessionId: session.id,
-          strategy: session.plan?.steps?.length > 0 ? 'multi-agent' : 'single-agent'
-        };
+        task.output = session.results;
         task.status = 'completed';
         task.completedAt = new Date();
         this.emit('task:completed', { task, collaboration: true });
@@ -54,31 +52,14 @@ export class TaskOrchestrator extends EventEmitter {
     });
 
     this.collaborationManager.on('session:failed', ({ session, error }) => {
-      this.logger.error(`❌ Collaboration session ${session.id} failed:`, error);
+      this.logger.error(`Collaboration session ${session.id} failed:`, error);
       
       const task = this.tasks.get(session.taskId);
       if (task) {
         task.status = 'failed';
-        task.error = error instanceof Error ? error.message : 'Collaboration failed';
+        task.error = error.message;
         this.emit('task:failed', { task, error, collaboration: true });
       }
-    });
-
-    // Forward step events for real-time UI updates
-    this.collaborationManager.on('step:started', ({ session, step }) => {
-      this.emit('collaboration:step_started', { 
-        taskId: session.taskId, 
-        stepName: step.name,
-        agentId: step.assignedAgent
-      });
-    });
-
-    this.collaborationManager.on('step:completed', ({ session, step, result }) => {
-      this.emit('collaboration:step_completed', { 
-        taskId: session.taskId, 
-        stepName: step.name,
-        result: result.output
-      });
     });
   }
 
@@ -87,63 +68,53 @@ export class TaskOrchestrator extends EventEmitter {
     type?: Task['type'];
     priority?: Task['priority'];
     context?: any;
-    useCollaboration?: boolean;
-    collaborationStrategy?: CollaborationStrategy;
+    projectId?: string;
+    dependencies?: string[];
   }): Promise<Task> {
     const task: Task = {
       id: uuidv4(),
-      projectId: '',
+      projectId: params.projectId || '',
       type: params.type || 'implementation',
       title: this.generateTaskTitle(params.prompt),
       description: params.prompt,
-      dependencies: [],
+      dependencies: params.dependencies || [],
       status: 'pending',
       priority: params.priority || 'medium',
       createdAt: new Date(),
       updatedAt: new Date(),
-      metadata: {
-        ...params.context,
-        useCollaboration: params.useCollaboration || false,
-        collaborationStrategy: params.collaborationStrategy || { type: 'sequential', config: {} }
-      }
+      metadata: params.context
     };
 
     this.tasks.set(task.id, task);
     this.taskQueue.push(task);
     this.sortTaskQueue();
     
-    this.logger.info(`✨ Task created: ${task.id} - ${task.title}`);
+    this.logger.info(`Task created: ${task.id} - ${task.title}`);
     this.emit('task:created', task);
     
     return task;
   }
 
-  public async executeTask(taskId: string, forceCollaboration?: boolean): Promise<any> {
+  public async executeTask(taskId: string, useCollaboration: boolean = false): Promise<any> {
     const task = this.tasks.get(taskId);
     if (!task) {
       throw new Error('Task not found');
     }
 
-    const useCollaboration = forceCollaboration || 
-                            task.metadata?.useCollaboration || 
-                            this.shouldUseCollaboration(task);
-
-    if (useCollaboration) {
-      return this.executeWithCollaboration(task);
-    } else {
-      return this.executeSingleAgent(task);
+    // Check if task requires collaboration
+    if (useCollaboration || this.requiresCollaboration(task)) {
+      return this.executeTaskWithCollaboration(task);
     }
-  }
 
-  private async executeSingleAgent(task: Task): Promise<any> {
+    // Get eligible agents for the task
     const agentScores = this.agentRegistry.findBestAgentForTask(task);
     if (agentScores.length === 0) {
-      throw new Error('No suitable agent found for this task');
+      throw new Error('No suitable agent found');
     }
 
     const bestAgentId = agentScores[0].agentId;
     const bestAgent = this.agentRegistry.getAgent(bestAgentId);
-    
+
     if (!bestAgent) {
       throw new Error('Agent not found');
     }
@@ -152,19 +123,19 @@ export class TaskOrchestrator extends EventEmitter {
     task.status = 'assigned';
     task.startedAt = new Date();
     
-    this.runningTasks.set(task.id, {
+    this.runningTasks.set(taskId, {
       agentId: bestAgent.config.id,
       startTime: new Date()
     });
 
-    this.logger.info(`🎯 Task ${task.id} assigned to ${bestAgent.config.name}`);
+    this.logger.info(`Task ${taskId} assigned to agent ${bestAgent.config.name}`);
     this.emit('task:assigned', { task, agent: bestAgent.config });
 
     try {
       task.status = 'in_progress';
       
       const request: AgentRequest = {
-        taskId: task.id,
+        taskId,
         prompt: task.description,
         context: task.metadata,
         priority: task.priority
@@ -178,25 +149,25 @@ export class TaskOrchestrator extends EventEmitter {
         task.completedAt = new Date();
         task.actualDuration = response.duration;
         
-        this.logger.info(`✅ Task ${task.id} completed in ${response.duration}ms`);
+        this.logger.info(`Task ${taskId} completed successfully`);
         this.emit('task:completed', { task, response });
       } else {
         task.status = 'failed';
         task.error = response.error;
         
-        this.logger.error(`❌ Task ${task.id} failed: ${response.error}`);
+        this.logger.error(`Task ${taskId} failed: ${response.error}`);
         this.emit('task:failed', { task, error: response.error });
       }
 
       return response;
-      
     } catch (error) {
       task.status = 'failed';
       task.error = error instanceof Error ? error.message : 'Unknown error';
       
-      this.logger.error(`💥 Task ${task.id} execution error:`, error);
+      this.logger.error(`Task ${taskId} execution error:`, error);
       this.emit('task:error', { task, error });
       
+      // Return a failed response instead of throwing
       return {
         taskId: task.id,
         agentId: bestAgent.config.id,
@@ -206,113 +177,105 @@ export class TaskOrchestrator extends EventEmitter {
         duration: Date.now() - (task.startedAt?.getTime() || Date.now())
       };
     } finally {
-      this.runningTasks.delete(task.id);
+      this.runningTasks.delete(taskId);
     }
   }
 
-  private async executeWithCollaboration(task: Task): Promise<any> {
-    this.logger.info(`🤝 Starting collaboration for task ${task.id}`);
-    
-    task.status = 'in_progress';
-    task.startedAt = new Date();
+  private startTaskProcessor(): void {
+    this.taskProcessorInterval = setInterval(() => {
+      this.processPendingTasks();
+    }, 5000);
+  }
 
-    try {
-      // Get collaboration strategy from task metadata
-      const strategy: CollaborationStrategy = task.metadata?.collaborationStrategy || 
-        this.determineCollaborationStrategy(task);
-
-      this.logger.info(`📋 Using ${strategy.type} collaboration strategy`);
-
-      // Create collaboration session using CollaborationManager
-      const session = await this.collaborationManager.createCollaborationSession(task, strategy);
-      
-      task.metadata = {
-        ...task.metadata,
-        collaborationSessionId: session.id,
-        collaborationAgents: session.agents,
-        collaborationStrategy: strategy.type
-      };
-
-      this.emit('collaboration:started', { 
-        task, 
-        sessionId: session.id,
-        strategy: strategy.type,
-        agents: session.agents 
-      });
-
-      // Execute collaboration session
-      const results = await this.collaborationManager.executeCollaborationSession(session.id);
-      
-      // Task completion handled by collaboration event handlers
-      return {
-        taskId: task.id,
-        success: true,
-        collaborationSession: session.id,
-        results: results,
-        duration: task.actualDuration || 0
-      };
-
-    } catch (error) {
-      task.status = 'failed';
-      task.error = error instanceof Error ? error.message : 'Collaboration failed';
-      
-      this.logger.error(`💥 Collaboration failed for task ${task.id}:`, error);
-      this.emit('task:error', { task, error });
-      
-      throw error;
+  public stopTaskProcessor(): void {
+    if (this.taskProcessorInterval) {
+      clearInterval(this.taskProcessorInterval);
+      this.taskProcessorInterval = null;
     }
   }
 
+  private async processPendingTasks(): Promise<void> {
+    const availableAgents = this.agentRegistry.getAvailableAgents();
+    if (availableAgents.length === 0) return;
 
-  private shouldUseCollaboration(task: Task): boolean {
-    // Auto-detect if task needs collaboration
-    const complexityKeywords = [
-      'review', 'validate', 'compare', 'multiple perspectives',
-      'complex', 'full stack', 'comprehensive', 'end-to-end',
-      'integrate', 'coordinate', 'collaborate'
-    ];
-    
-    const description = task.description.toLowerCase();
-    const hasComplexityIndicator = complexityKeywords.some(keyword => 
-      description.includes(keyword)
-    );
+    const maxConcurrentTasks = parseInt(process.env.MAX_CONCURRENT_TASKS || '10');
+    if (this.runningTasks.size >= maxConcurrentTasks) return;
 
-    // High priority tasks might benefit from collaboration
-    const isHighPriority = task.priority === 'critical' || task.priority === 'high';
-    
-    return hasComplexityIndicator || (isHighPriority && description.length > 200);
+    const pendingTasks = this.taskQueue.filter(task => {
+      if (task.status !== 'pending') return false;
+      
+      if (task.dependencies && task.dependencies.length > 0) {
+        const allDependenciesCompleted = task.dependencies.every(depId => {
+          const depTask = this.tasks.get(depId);
+          return depTask && depTask.status === 'completed';
+        });
+        if (!allDependenciesCompleted) return false;
+      }
+      
+      return true;
+    });
+
+    for (const task of pendingTasks) {
+      if (this.runningTasks.size >= maxConcurrentTasks) break;
+      
+      try {
+        await this.executeTask(task.id);
+      } catch (error) {
+        this.logger.error(`Failed to execute task ${task.id}:`, error);
+      }
+    }
   }
 
-  private determineCollaborationStrategy(task: Task): CollaborationStrategy {
-    const description = task.description.toLowerCase();
+  private sortTaskQueue(): void {
+    this.taskQueue.sort((a, b) => {
+      const priorityOrder = { critical: 0, high: 1, medium: 2, low: 3 };
+      return priorityOrder[a.priority] - priorityOrder[b.priority];
+    });
+  }
 
-    // Sequential: step-by-step tasks
-    if (description.includes('step by step') || description.includes('phase')) {
-      return { type: 'sequential', config: {} };
-    }
-
-    // Parallel: independent components
-    if (description.includes('parallel') || description.includes('independent')) {
-      return { type: 'parallel', config: {} };
-    }
-
-    // Hierarchical: complex projects with planning
-    if (description.includes('project') || description.includes('plan')) {
-      return { type: 'hierarchical', config: {} };
-    }
-
-    // Consensus: needs validation or multiple opinions
-    if (description.includes('review') || description.includes('validate') || 
-        description.includes('consensus')) {
-      return { type: 'consensus', config: {} };
-    }
-
-    // Default to sequential
-    return { type: 'sequential', config: {} };
+  private generateTaskTitle(prompt: string): string {
+    const firstLine = prompt.split('\n')[0];
+    const title = firstLine.substring(0, 100);
+    return title.length < firstLine.length ? title + '...' : title;
   }
 
   public getTask(taskId: string): Task | undefined {
     return this.tasks.get(taskId);
+  }
+
+  public updateTask(taskId: string, updates: Partial<Task>): Task | undefined {
+    const task = this.tasks.get(taskId);
+    if (!task) {
+      return undefined;
+    }
+    
+    const updatedTask = {
+      ...task,
+      ...updates,
+      id: task.id, // Prevent ID change
+      updatedAt: new Date()
+    };
+    
+    this.tasks.set(taskId, updatedTask);
+    this.emit('task:updated', { task: updatedTask });
+    
+    return updatedTask;
+  }
+
+  public deleteTask(taskId: string): boolean {
+    const task = this.tasks.get(taskId);
+    if (!task) {
+      return false;
+    }
+    
+    this.tasks.delete(taskId);
+    this.emit('task:deleted', { taskId });
+    
+    return true;
+  }
+
+  public getRunningTasks(): Map<string, { agentId: string, startTime: Date }> {
+    return new Map(this.runningTasks);
   }
 
   public async getTasks(filters?: {
@@ -337,53 +300,164 @@ export class TaskOrchestrator extends EventEmitter {
     return tasks;
   }
 
-  public getRunningTasks(): Map<string, { agentId: string, startTime: Date }> {
-    return new Map(this.runningTasks);
+  private requiresCollaboration(task: Task): boolean {
+    
+    const complexityKeywords = [
+      'review', 'validate', 'compare', 'multiple perspectives',
+      'complex', 'full stack', 'comprehensive', 'end-to-end',
+      'integrate', 'coordinate', 'collaborate','multiple agents',
+      'cross-functional',
+      'full stack',
+      'end-to-end',
+      'comprehensive',
+      'integrate',
+      'coordinate'
+    ];
+
+    const description = task.description.toLowerCase();
+    const hasComplexityIndicator = complexityKeywords.some(indicator => 
+      description.includes(indicator)
+    );
+
+    // High priority complex tasks benefit from collaboration
+    const isHighComplexity = task.priority === 'critical' || 
+      (task.priority === 'high' && hasComplexityIndicator);
+
+    return isHighComplexity || hasComplexityIndicator;
   }
 
-  public updateTask(taskId: string, updates: Partial<Task>): Task | undefined {
-    const task = this.tasks.get(taskId);
-    if (!task) {
-      return undefined;
-    }
+  private async executeTaskWithCollaboration(task: Task): Promise<any> {
+  this.logger.info(`🤝 Executing task ${task.id} with collaboration`);
+
+  // ✅ Set startedAt BEFORE any async operations
+  if (!task.startedAt) {
+    task.startedAt = new Date();
+  }
+
+  // Determine collaboration strategy
+  const strategy = this.determineCollaborationStrategy(task);
+
+  try {
+    // Create collaboration session
+    const session = await this.collaborationManager.createCollaborationSession(task, strategy);
     
-    const updatedTask = {
-      ...task,
-      ...updates,
-      id: task.id,
-      updatedAt: new Date()
+    task.status = 'in_progress';
+    task.metadata = {
+      ...task.metadata,
+      collaborationSessionId: session.id,
+      collaborationAgents: session.agents,
+      collaborationStrategy: strategy.type
     };
-    
-    this.tasks.set(taskId, updatedTask);
-    this.emit('task:updated', { task: updatedTask });
-    
-    return updatedTask;
-  }
 
-  public deleteTask(taskId: string): boolean {
-    const task = this.tasks.get(taskId);
-    if (!task) {
-      return false;
+    this.emit('collaboration:started', { 
+      task, 
+      sessionId: session.id,
+      strategy: strategy.type 
+    });
+
+    // Execute collaboration
+    const results = await this.collaborationManager.executeCollaborationSession(session.id);
+    
+    // Process results
+    const synthesizedResult = this.synthesizeCollaborationResults(results);
+    
+    task.status = 'completed';
+    task.output = synthesizedResult;
+    task.completedAt = new Date();
+    
+    // ✅ Safe duration calculation
+    task.actualDuration = task.startedAt 
+      ? Date.now() - task.startedAt.getTime() 
+      : 0;
+
+    this.logger.info(`✅ Task ${task.id} completed with collaboration in ${task.actualDuration}ms`);
+
+    // Emit success event
+    this.emit('task:completed', { task, collaboration: true });
+
+    return {
+      taskId: task.id,
+      success: true,
+      collaborationSession: session.id,
+      results: synthesizedResult,
+      duration: task.actualDuration
+    };
+
+  } catch (error) {
+    task.status = 'failed';
+    task.error = error instanceof Error ? error.message : 'Collaboration failed';
+    
+    // ✅ Safe duration calculation on error
+    if (task.startedAt) {
+      task.actualDuration = Date.now() - task.startedAt.getTime();
+    } else {
+      task.actualDuration = 0;
     }
     
-    this.tasks.delete(taskId);
-    this.taskQueue = this.taskQueue.filter(t => t.id !== taskId);
-    this.emit('task:deleted', { taskId });
+    this.logger.error(`❌ Task ${task.id} collaboration failed:`, error);
+    this.emit('task:error', { task, error });
     
-    return true;
+    // Return error response instead of throwing
+    return {
+      taskId: task.id,
+      success: false,
+      error: task.error,
+      duration: task.actualDuration
+    };
+  }
+}
+
+  private determineCollaborationStrategy(task: Task): CollaborationStrategy {
+    const description = task.description.toLowerCase();
+
+    // Consensus for design and architecture decisions
+    if (task.type === 'design' || description.includes('architecture')) {
+      return { type: 'consensus', config: {} };
+    }
+
+    // Parallel for independent components
+    if (description.includes('frontend') && description.includes('backend')) {
+      return { type: 'parallel', config: {} };
+    }
+
+    // Hierarchical for complex multi-step tasks
+    if (task.priority === 'critical' || (task.requirements && task.requirements.length > 5)) {
+      return { type: 'hierarchical', config: {} };
+    }
+
+    // Default to sequential
+    return { type: 'sequential', config: {} };
   }
 
-  private sortTaskQueue(): void {
-    const priorityOrder = { critical: 0, high: 1, medium: 2, low: 3 };
-    this.taskQueue.sort((a, b) => {
-      return priorityOrder[a.priority] - priorityOrder[b.priority];
-    });
+  private synthesizeCollaborationResults(results: any[]): any {
+    // Combine results from multiple agents
+    const synthesis = {
+      summary: 'Task completed through multi-agent collaboration',
+      results: results,
+      combinedOutput: {},
+      metadata: {
+        agentCount: new Set(results.map(r => r.agentId)).size,
+        totalDuration: results.reduce((sum, r) => sum + r.duration, 0),
+        timestamp: new Date()
+      }
+    };
+
+    // Merge outputs
+    for (const result of results) {
+      if (result.output && typeof result.output === 'object') {
+        Object.assign(synthesis.combinedOutput, result.output);
+      }
+    }
+
+    return synthesis;
   }
 
-  private generateTaskTitle(prompt: string): string {
-    const firstLine = prompt.split('\n')[0];
-    const title = firstLine.substring(0, 100);
-    return title.length < firstLine.length ? title + '...' : title;
+  public getCollaborationSessions() {
+    return this.collaborationManager.getAllSessions();
+  }
+
+  public getCollaborationSession(sessionId: string) {
+    return this.collaborationManager.getSession(sessionId);
   }
 
   public getStats() {
@@ -409,12 +483,5 @@ export class TaskOrchestrator extends EventEmitter {
     const total = completedTasks.reduce((sum, t) => sum + (t.actualDuration || 0), 0);
     return Math.round(total / completedTasks.length);
   }
-
-  public getCollaborationSession(sessionId: string) {
-    return this.collaborationManager.getSession(sessionId);
-  }
-
-  public getAllCollaborationSessions() {
-    return this.collaborationManager.getAllSessions();
-  }
+ 
 }
