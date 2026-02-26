@@ -13,6 +13,7 @@ import { GroqAgent } from './agents/implementations/groq-agent';
 import { MistralAgent } from './agents/implementations/Mistral-agent';
 import { TaskOrchestrator } from './orchestration/task-orchestrator'; 
 import { z } from 'zod';
+import rateLimit from 'express-rate-limit';
 
 dotenv.config();
 
@@ -90,6 +91,7 @@ async function main() {
   // Express middleware 
   app.use(express.json());
 
+
   app.use((req, res, next) => {
     const origin = req.headers.origin;
     res.header('Access-Control-Allow-Origin', origin || '*');
@@ -99,6 +101,14 @@ async function main() {
     if (req.method === 'OPTIONS') return res.sendStatus(200);
     next();
   });
+
+  app.use('/api/tasks', rateLimit({
+    windowMs: 60_000,
+    max: 20,
+    message: { error: 'Too many requests — max 20 per minute' },
+    standardHeaders: true,
+    legacyHeaders: false,
+  }));
 
 
   // SSE auth 
@@ -201,11 +211,11 @@ async function main() {
   // Task routes (protected) 
   app.post('/api/tasks', authMiddleware.authenticate, async (req, res) => {
     try {
+      const parsed = CreateTaskSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ errors: parsed.error.issues });
+
       const { prompt, type, priority, context, useCollaboration } = req.body;
 
-      const parsed = CreateTaskSchema.safeParse(req.body);
-      if (!parsed.success) return res.status(400).json({ errors: parsed.error.flatten() });
-      
       const organizationId = (req as any).user?.organizationId 
       || (req as any).user?.orgId
       || process.env.DEFAULT_ORG_ID;
