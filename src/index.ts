@@ -102,14 +102,6 @@ async function main() {
     next();
   });
 
-  app.use('/api/tasks', rateLimit({
-    windowMs: 60_000,
-    max: 20,
-    message: { error: 'Too many requests — max 20 per minute' },
-    standardHeaders: true,
-    legacyHeaders: false,
-  }));
-
 
   // SSE auth 
   const sseAuth = async (req: any, res: any, next: any) => {
@@ -212,6 +204,18 @@ async function main() {
       }
       req.on('close', cleanup);
     });
+
+  app.use('/api/tasks', (req, res, next) => {
+    if (req.path.endsWith('/stream')) return next();
+    return rateLimit({
+      windowMs: 60_000,
+      max: 20,
+      message: { error: 'Too many requests — max 20 per minute' },
+      standardHeaders: true,
+      legacyHeaders: false,
+    })(req, res, next);
+  });
+
 
   // Auth routes (public) 
   app.use('/api/legacy-auth', legacyAuthRoutes);
