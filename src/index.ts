@@ -135,75 +135,83 @@ async function main() {
     const { taskId } = req.params;
 
     res.setHeader('Content-Type',      'text/event-stream');
-    res.setHeader('Cache-Control',     'no-cache');
+    res.setHeader('Cache-Control',     'no-cache, no-transform');
     res.setHeader('Connection',        'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
+    res.setHeader('Transfer-Encoding', 'chunked');
     res.flushHeaders();
 
+    
     const send = (event: string, data: object) =>
       res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
-    send('connected', { taskId, timestamp: new Date() });
-    const keepAlive = setInterval(() => res.write(': ping\n\n'), 15_000);
+      send('connected', { taskId, timestamp: new Date() });
+      
 
-    const onAssigned = ({ task, agent }: any) => {
-      if (task.id !== taskId) return;
-      send('task:assigned', { message: `Task assigned to ${agent.name}`, agentName: agent.name, timestamp: new Date() });
-    };
-    const onCompleted = ({ task, collaboration }: any) => {
-      if (task.id !== taskId) return;
-      send('task:completed', {
-        message: collaboration ? 'Multi-agent collaboration completed ✓' : 'Task completed successfully ✓',
-        duration: task.actualDuration, timestamp: new Date(),
-      });
-      cleanup();
-    };
-    const onFailed = ({ task, error }: any) => {
-      if (task.id !== taskId) return;
-      send('task:failed', { message: `Task failed: ${error?.message ?? error}`, timestamp: new Date() });
-      cleanup();
-    };
-    const onTaskError = ({ task, error }: any) => {
-      if (task.id !== taskId) return;
-      send('task:error', { message: `Error: ${error instanceof Error ? error.message : String(error)}`, timestamp: new Date() });
-      cleanup();
-    };
-    const onCollabStarted = ({ task: t, sessionId, strategy }: any) => {
-      if (t.id !== taskId) return;
-      send('collaboration:started', { message: `Collaboration started — ${strategy}`, sessionId, strategy, timestamp: new Date() });
-    };
-    const collabManager = (taskOrchestrator as any).collaborationManager;
-    const onStepStarted   = ({ session, step }: any) => { if (session.taskId !== taskId) return; const a = agentRegistry.getAgent(step.assignedAgent); send('step:started',   { message: `▶  Step "${step.name}" started`, agentName: a?.config?.name ?? step.assignedAgent, stepId: step.id, timestamp: new Date() }); };
-    const onStepCompleted = ({ session, step, result }: any) => { if (session.taskId !== taskId) return; send('step:completed', { message: `✓  Step "${step.name}" completed`, stepId: step.id, duration: result.duration, timestamp: new Date() }); };
-    const onStepFailed    = ({ session, step, error }: any) => { if (session.taskId !== taskId) return; send('step:failed',    { message: `✗  Step "${step.name}" failed: ${error?.message ?? error}`, stepId: step.id, timestamp: new Date() }); };
+       const keepAlive = setInterval(() => {
+          res.write(': ping\n\n');
+          // Force flush on Render
+          if ((res as any).flush) (res as any).flush();
+        }, 10_000);
 
-    taskOrchestrator.on('task:assigned',         onAssigned);
-    taskOrchestrator.on('task:completed',        onCompleted);
-    taskOrchestrator.on('task:failed',           onFailed);
-    taskOrchestrator.on('task:error',            onTaskError);
-    taskOrchestrator.on('collaboration:started', onCollabStarted);
-    if (collabManager) {
-      collabManager.on('step:started',   onStepStarted);
-      collabManager.on('step:completed', onStepCompleted);
-      collabManager.on('step:failed',    onStepFailed);
-    }
+      const onAssigned = ({ task, agent }: any) => {
+        if (task.id !== taskId) return;
+        send('task:assigned', { message: `Task assigned to ${agent.name}`, agentName: agent.name, timestamp: new Date() });
+      };
+      const onCompleted = ({ task, collaboration }: any) => {
+        if (task.id !== taskId) return;
+        send('task:completed', {
+          message: collaboration ? 'Multi-agent collaboration completed ✓' : 'Task completed successfully ✓',
+          duration: task.actualDuration, timestamp: new Date(),
+        });
+        cleanup();
+      };
+      const onFailed = ({ task, error }: any) => {
+        if (task.id !== taskId) return;
+        send('task:failed', { message: `Task failed: ${error?.message ?? error}`, timestamp: new Date() });
+        cleanup();
+      };
+      const onTaskError = ({ task, error }: any) => {
+        if (task.id !== taskId) return;
+        send('task:error', { message: `Error: ${error instanceof Error ? error.message : String(error)}`, timestamp: new Date() });
+        cleanup();
+      };
+      const onCollabStarted = ({ task: t, sessionId, strategy }: any) => {
+        if (t.id !== taskId) return;
+        send('collaboration:started', { message: `Collaboration started — ${strategy}`, sessionId, strategy, timestamp: new Date() });
+      };
+      const collabManager = (taskOrchestrator as any).collaborationManager;
+      const onStepStarted   = ({ session, step }: any) => { if (session.taskId !== taskId) return; const a = agentRegistry.getAgent(step.assignedAgent); send('step:started',   { message: `▶  Step "${step.name}" started`, agentName: a?.config?.name ?? step.assignedAgent, stepId: step.id, timestamp: new Date() }); };
+      const onStepCompleted = ({ session, step, result }: any) => { if (session.taskId !== taskId) return; send('step:completed', { message: `✓  Step "${step.name}" completed`, stepId: step.id, duration: result.duration, timestamp: new Date() }); };
+      const onStepFailed    = ({ session, step, error }: any) => { if (session.taskId !== taskId) return; send('step:failed',    { message: `✗  Step "${step.name}" failed: ${error?.message ?? error}`, stepId: step.id, timestamp: new Date() }); };
 
-    function cleanup() {
-      clearInterval(keepAlive);
-      taskOrchestrator.off('task:assigned',         onAssigned);
-      taskOrchestrator.off('task:completed',        onCompleted);
-      taskOrchestrator.off('task:failed',           onFailed);
-      taskOrchestrator.off('task:error',            onTaskError);
-      taskOrchestrator.off('collaboration:started', onCollabStarted);
+      taskOrchestrator.on('task:assigned',         onAssigned);
+      taskOrchestrator.on('task:completed',        onCompleted);
+      taskOrchestrator.on('task:failed',           onFailed);
+      taskOrchestrator.on('task:error',            onTaskError);
+      taskOrchestrator.on('collaboration:started', onCollabStarted);
       if (collabManager) {
-        collabManager.off('step:started',   onStepStarted);
-        collabManager.off('step:completed', onStepCompleted);
-        collabManager.off('step:failed',    onStepFailed);
+        collabManager.on('step:started',   onStepStarted);
+        collabManager.on('step:completed', onStepCompleted);
+        collabManager.on('step:failed',    onStepFailed);
       }
-      if (!res.writableEnded) res.end();
-    }
-    req.on('close', cleanup);
-  });
+
+      function cleanup() {
+        clearInterval(keepAlive);
+        taskOrchestrator.off('task:assigned',         onAssigned);
+        taskOrchestrator.off('task:completed',        onCompleted);
+        taskOrchestrator.off('task:failed',           onFailed);
+        taskOrchestrator.off('task:error',            onTaskError);
+        taskOrchestrator.off('collaboration:started', onCollabStarted);
+        if (collabManager) {
+          collabManager.off('step:started',   onStepStarted);
+          collabManager.off('step:completed', onStepCompleted);
+          collabManager.off('step:failed',    onStepFailed);
+        }
+        if (!res.writableEnded) res.end();
+      }
+      req.on('close', cleanup);
+    });
 
   // Auth routes (public) 
   app.use('/api/legacy-auth', legacyAuthRoutes);
