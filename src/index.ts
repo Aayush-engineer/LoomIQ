@@ -12,6 +12,7 @@ import path from 'path';
 import { GroqAgent } from './agents/implementations/groq-agent';
 import { MistralAgent } from './agents/implementations/Mistral-agent';
 import { TaskOrchestrator } from './orchestration/task-orchestrator'; 
+import { z } from 'zod';
 
 dotenv.config();
 
@@ -25,7 +26,12 @@ const logger = winston.createLogger({
 });
 
 
-
+const CreateTaskSchema = z.object({
+  prompt:           z.string().min(5).max(10000),
+  type:             z.enum(['implementation','design','test','review','deployment','requirement']).optional(),
+  priority:         z.enum(['low','medium','high','critical']).optional(),
+  useCollaboration: z.boolean().optional().default(false),
+});
 
 async function main() {
   logger.info('Starting LoomIQ system');
@@ -196,6 +202,10 @@ async function main() {
   app.post('/api/tasks', authMiddleware.authenticate, async (req, res) => {
     try {
       const { prompt, type, priority, context, useCollaboration } = req.body;
+
+      const parsed = CreateTaskSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ errors: parsed.error.flatten() });
+      
       const organizationId = (req as any).user?.organizationId 
       || (req as any).user?.orgId
       || process.env.DEFAULT_ORG_ID;
