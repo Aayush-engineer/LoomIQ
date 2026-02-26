@@ -142,9 +142,9 @@ async function main() {
 
        const keepAlive = setInterval(() => {
           res.write(': ping\n\n');
-          // Force flush on Render
+          
           if ((res as any).flush) (res as any).flush();
-        }, 10_000);
+        }, 5_000);
 
       const onAssigned = ({ task, agent }: any) => {
         if (task.id !== taskId) return;
