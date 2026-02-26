@@ -1,3 +1,7 @@
+<<<<<<< HEAD
+=======
+ 
+>>>>>>> 2815e52 (fix(sse): resolve 401 on stream auth and collaboration completion event)
 
 
 # 🧠 LoomIQ - Multi-Agent AI Orchestration Platform
@@ -868,4 +872,8 @@ MIT License - see [LICENSE](LICENSE) file
 
 Made with ❤️ by [Aayush Kumar](https://github.com/Aayush-engineer)
 
+<<<<<<< HEAD
 </div>
+=======
+</div>
+>>>>>>> 2815e52 (fix(sse): resolve 401 on stream auth and collaboration completion event)

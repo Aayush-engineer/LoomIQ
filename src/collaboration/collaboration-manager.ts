@@ -646,17 +646,17 @@ export class CollaborationManager extends EventEmitter {
       taskId: session.taskId,
       prompt: `Review the collaboration results for task: ${session.context.task.description}
       
-Objectives:
-${session.context.objectives.map(o => `- ${o}`).join('\n')}
+      Objectives:
+      ${session.context.objectives.map(o => `- ${o}`).join('\n')}
 
-Results from collaboration:
-${JSON.stringify(results, null, 2)}
+      Results from collaboration:
+      ${JSON.stringify(results, null, 2)}
 
-Please:
-1. Verify all objectives have been met
-2. Check for consistency across results
-3. Identify any issues or improvements
-4. Provide a final synthesized result`,
+      Please:
+      1. Verify all objectives have been met
+      2. Check for consistency across results
+      3. Identify any issues or improvements
+      4. Provide a final synthesized result`,
       context: {
         session,
         results
@@ -791,10 +791,10 @@ Please:
     outputs: string[];
   }> {
     interface Phase {
-  name: string;
-  description: string;
-  outputs: string[];
-}
+      name: string;
+      description: string;
+      outputs: string[];
+    }
 
     const phases: Phase[] = [];
 
