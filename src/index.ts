@@ -3,7 +3,7 @@ import express from 'express';
 import { createServer } from 'http';
 import winston from 'winston';
 import { DatabaseService } from './database/database-service';
-import { AuthService } from './services/auth-service';
+import { AuthService } from './services/auth-service';          
 import { createAuthMiddleware } from './middleware/auth-middleware';
 import { createAuthRoutes } from './routes/auth-routes';
 import { CommunicationHubImplementation } from './communication/communication-hub';
@@ -11,27 +11,26 @@ import { AgentRegistry } from './agents/agent-registry';
 import path from 'path';
 import { GroqAgent } from './agents/implementations/groq-agent';
 import { MistralAgent } from './agents/implementations/Mistral-agent';
-import { TaskOrchestrator } from './orchestration/task-orchestratortask-orchestrator';
+import { TaskOrchestrator } from './orchestration/task-orchestrator'; 
 
 dotenv.config();
 
 const logger = winston.createLogger({
   level: 'info',
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.json()
-  ),
+  format: winston.format.combine(winston.format.timestamp(), winston.format.json()),
   transports: [
     new winston.transports.Console({ format: winston.format.simple() }),
-    new winston.transports.File({ filename: 'orchestrator.log' })
-  ]
+    new winston.transports.File({ filename: 'orchestrator.log' }),
+  ],
 });
 
+
+
+
 async function main() {
-  logger.info('Starting loomiq system');
+  logger.info('Starting LoomIQ system');
 
-  
-
+  // DATABASE
   const db = DatabaseService.getInstance();
   try {
     await db.initialize();
@@ -41,18 +40,22 @@ async function main() {
     process.exit(1);
   }
 
+  // AUTH
+  const authService    = new AuthService(db, process.env.JWT_SECRET);
+  const authMiddleware = createAuthMiddleware(authService);
+  const legacyAuthRoutes = createAuthRoutes(authService);
 
-
-  const app = express();
+  // Agents & Communication 
+  const app        = express();
   const httpServer = createServer(app);
-  const port = Number(process.env.PORT) || 3000;
+  const port       = Number(process.env.PORT) || 3000;
+  const mcp_port   = Number(process.env.MCP_PORT) || 4000;
 
-  const mcp_port = Number(process.env.MCP_PORT) || 4000;
   const communicationHub = new CommunicationHubImplementation();
   await communicationHub.initialize(mcp_port);
 
   const agentRegistry = new AgentRegistry();
-  const configPath = path.join(__dirname, '../config/agents.yaml');
+  const configPath    = path.join(__dirname, '../config/agents.yaml');
   await agentRegistry.loadConfigurations(configPath);
 
   const groqConfig = agentRegistry.getAgentConfig('groq-001');
@@ -73,8 +76,12 @@ async function main() {
     logger.info('✅ Mistral agent registered');
   }
 
-  const taskOrchestrator = new TaskOrchestrator(agentRegistry, communicationHub);
+  // Orchestrator 
+  const taskOrchestrator = new TaskOrchestrator(agentRegistry, communicationHub, db);
 
+
+
+  // Express middleware 
   app.use(express.json());
 
   app.use((req, res, next) => {
@@ -87,37 +94,27 @@ async function main() {
     next();
   });
 
-  const authService = new AuthService(process.env.JWT_SECRET);
-  const authMiddleware = createAuthMiddleware(authService);
-  const legacyAuthRoutes = createAuthRoutes(authService);
 
-  // ── SSE auth: reads token from query param because EventSource can't set headers ──
+  // SSE auth 
   const sseAuth = async (req: any, res: any, next: any) => {
     try {
       let token: string | undefined;
-
       const authHeader = req.headers.authorization;
       if (authHeader?.startsWith('Bearer ')) {
         token = authHeader.slice(7);
       } else if (req.query.token) {
         token = req.query.token as string;
       }
-
-      if (!token) {
-        return res.status(401).json({ error: 'Missing token' });
-      }
-
-      // Use authService.verifyToken directly — does NOT re-read headers
+      if (!token) return res.status(401).json({ error: 'Missing token' });
       const payload = await authService.verifyToken(token);
       req.user = payload;
-      req.authService = authService;
       next();
-    } catch (err) {
+    } catch {
       return res.status(401).json({ error: 'Invalid or expired token' });
     }
   };
 
-  // ── SSE stream route ──────────────────────────────────────────────
+  // SSE stream route 
   app.get('/api/tasks/:taskId/stream', sseAuth, (req, res) => {
     const { taskId } = req.params;
 
@@ -127,97 +124,48 @@ async function main() {
     res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders();
 
-    const send = (event: string, data: object) => {
+    const send = (event: string, data: object) =>
       res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    };
 
     send('connected', { taskId, timestamp: new Date() });
-
-    const keepAlive = setInterval(() => { res.write(': ping\n\n'); }, 15_000);
+    const keepAlive = setInterval(() => res.write(': ping\n\n'), 15_000);
 
     const onAssigned = ({ task, agent }: any) => {
       if (task.id !== taskId) return;
-      send('task:assigned', {
-        message:   `Task assigned to ${agent.name} (${agent.provider})`,
-        agentName: agent.name,
-        agentId:   agent.id,
-        timestamp: new Date(),
-      });
+      send('task:assigned', { message: `Task assigned to ${agent.name}`, agentName: agent.name, timestamp: new Date() });
     };
-
     const onCompleted = ({ task, collaboration }: any) => {
       if (task.id !== taskId) return;
       send('task:completed', {
-        message:       collaboration ? 'Multi-agent collaboration completed ✓' : 'Task completed successfully ✓',
-        duration:      task.actualDuration,
-        collaboration: !!collaboration,
-        timestamp:     new Date(),
+        message: collaboration ? 'Multi-agent collaboration completed ✓' : 'Task completed successfully ✓',
+        duration: task.actualDuration, timestamp: new Date(),
       });
       cleanup();
     };
-
     const onFailed = ({ task, error }: any) => {
       if (task.id !== taskId) return;
-      send('task:failed', {
-        message:   `Task failed: ${typeof error === 'string' ? error : error?.message ?? 'Unknown error'}`,
-        timestamp: new Date(),
-      });
+      send('task:failed', { message: `Task failed: ${error?.message ?? error}`, timestamp: new Date() });
       cleanup();
     };
-
     const onTaskError = ({ task, error }: any) => {
       if (task.id !== taskId) return;
-      send('task:error', {
-        message:   `Error: ${error instanceof Error ? error.message : String(error)}`,
-        timestamp: new Date(),
-      });
+      send('task:error', { message: `Error: ${error instanceof Error ? error.message : String(error)}`, timestamp: new Date() });
       cleanup();
     };
-
     const onCollabStarted = ({ task: t, sessionId, strategy }: any) => {
       if (t.id !== taskId) return;
-      send('collaboration:started', {
-        message:   `Multi-agent collaboration started — strategy: ${strategy}`,
-        sessionId, strategy, timestamp: new Date(),
-      });
+      send('collaboration:started', { message: `Collaboration started — ${strategy}`, sessionId, strategy, timestamp: new Date() });
     };
-
     const collabManager = (taskOrchestrator as any).collaborationManager;
-
-    const onStepStarted = ({ session, step }: any) => {
-      if (session.taskId !== taskId) return;
-      const agent = agentRegistry.getAgent(step.assignedAgent);
-      send('step:started', {
-        message:   `▶  Step "${step.name}" started`,
-        stepId:    step.id, stepName: step.name,
-        agentName: agent?.config?.name ?? step.assignedAgent,
-        timestamp: new Date(),
-      });
-    };
-
-    const onStepCompleted = ({ session, step, result }: any) => {
-      if (session.taskId !== taskId) return;
-      send('step:completed', {
-        message:   `✓  Step "${step.name}" completed`,
-        stepId:    step.id, stepName: step.name,
-        duration:  result.duration, timestamp: new Date(),
-      });
-    };
-
-    const onStepFailed = ({ session, step, error }: any) => {
-      if (session.taskId !== taskId) return;
-      send('step:failed', {
-        message:   `✗  Step "${step.name}" failed: ${error?.message ?? error}`,
-        stepId:    step.id, stepName: step.name, timestamp: new Date(),
-      });
-    };
+    const onStepStarted   = ({ session, step }: any) => { if (session.taskId !== taskId) return; const a = agentRegistry.getAgent(step.assignedAgent); send('step:started',   { message: `▶  Step "${step.name}" started`, agentName: a?.config?.name ?? step.assignedAgent, stepId: step.id, timestamp: new Date() }); };
+    const onStepCompleted = ({ session, step, result }: any) => { if (session.taskId !== taskId) return; send('step:completed', { message: `✓  Step "${step.name}" completed`, stepId: step.id, duration: result.duration, timestamp: new Date() }); };
+    const onStepFailed    = ({ session, step, error }: any) => { if (session.taskId !== taskId) return; send('step:failed',    { message: `✗  Step "${step.name}" failed: ${error?.message ?? error}`, stepId: step.id, timestamp: new Date() }); };
 
     taskOrchestrator.on('task:assigned',         onAssigned);
     taskOrchestrator.on('task:completed',        onCompleted);
     taskOrchestrator.on('task:failed',           onFailed);
     taskOrchestrator.on('task:error',            onTaskError);
     taskOrchestrator.on('collaboration:started', onCollabStarted);
-
     if (collabManager) {
       collabManager.on('step:started',   onStepStarted);
       collabManager.on('step:completed', onStepCompleted);
@@ -238,128 +186,100 @@ async function main() {
       }
       if (!res.writableEnded) res.end();
     }
-
     req.on('close', cleanup);
   });
 
-  // ── Auth routes (public) ──────────────────────────────────────────
+  // Auth routes (public) 
   app.use('/api/legacy-auth', legacyAuthRoutes);
 
-  // ── Task routes ───────────────────────────────────────────────────
-  app.post('/api/tasks', async (req, res) => {
+  // Task routes (protected) 
+  app.post('/api/tasks', authMiddleware.authenticate, async (req, res) => {
     try {
       const { prompt, type, priority, context, useCollaboration } = req.body;
+      const organizationId = (req as any).user?.organizationId 
+      || (req as any).user?.orgId
+      || process.env.DEFAULT_ORG_ID;
+      const task = await taskOrchestrator.createTask({ prompt, type, priority, context,organizationId });
 
-      const task = await taskOrchestrator.createTask({
-        prompt,
-        type:     type     || 'implementation',
-        priority: priority || 'medium',
-        context
-      });
-
-      // Respond immediately so frontend can open SSE stream before execution starts
       res.json({ success: true, task, result: null });
 
-      // Execute in background — NOT awaited
-      taskOrchestrator.executeTask(task.id, useCollaboration).catch(error => {
-        logger.error('Background task execution failed', error);
-      });
-
+      taskOrchestrator.executeTask(task.id, useCollaboration).catch(err =>
+        logger.error('Background task execution failed', err)
+      );
     } catch (error) {
       logger.error('Task creation failed', error);
-      res.status(500).json({
-        success: false,
-        error: error instanceof Error ? error.message : 'Unknown error'
-      });
+      res.status(500).json({ success: false, error: error instanceof Error ? error.message : 'Unknown error' });
     }
   });
 
-  app.get('/api/tasks/:taskId', async (req, res) => {
+  app.get('/api/tasks/:taskId', authMiddleware.authenticate, async (req, res) => {
     try {
-      const task = taskOrchestrator.getTask(req.params.taskId);
+      const task = await taskOrchestrator.getTask(req.params.taskId);
       if (!task) return res.status(404).json({ error: 'Task not found' });
       res.json({ task });
     } catch (error) {
-      logger.error('Failed to get task', error);
       res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
     }
   });
 
-  app.get('/api/tasks', async (req, res) => {
+  app.get('/api/tasks', authMiddleware.authenticate, async (req, res) => {
     try {
       const { status, type, priority } = req.query;
-      const tasks = await taskOrchestrator.getTasks({
-        status:   status   as any,
-        type:     type     as any,
-        priority: priority as any
-      });
+      const tasks = await taskOrchestrator.getTasks({ status, type, priority } as any);
       res.json({ tasks });
     } catch (error) {
-      logger.error('Failed to get tasks', error);
       res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
     }
   });
 
-  app.get('/api/stats', async (req, res) => {
+  app.get('/api/stats', authMiddleware.authenticate, async (req, res) => {
     try {
-      const stats = taskOrchestrator.getStats();
+      const stats = await taskOrchestrator.getFullStats();
       res.json({ stats });
     } catch (error) {
-      logger.error('Failed to get stats', error);
       res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
     }
   });
 
-  app.get('/api/agents', async (req, res) => {
+  app.get('/api/agents', authMiddleware.authenticate, async (req, res) => {
     try {
-      const agents = agentRegistry.getAllAgents().map(agent => ({
-        id:           agent.config.id,
-        name:         agent.config.name,
-        provider:     agent.config.provider,
-        status:       agent.getStatus(),
-        capabilities: agent.getCapabilities()
+      const agents = agentRegistry.getAllAgents().map(a => ({
+        id: a.config.id, name: a.config.name, provider: a.config.provider,
+        status: a.getStatus(), capabilities: a.getCapabilities(),
       }));
       res.json({ agents });
     } catch (error) {
-      logger.error('Failed to get agents', error);
-      res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
-    }
-  });
-
-  app.post('/api/tasks/:id/collaborate', async (req, res) => {
-    try {
-      const task = taskOrchestrator.getTask(req.params.id);
-      if (!task) return res.status(404).json({ error: 'Task not found' });
-      const result = await taskOrchestrator.executeTask(task.id, true);
-      res.json({ task, result });
-    } catch (error) {
-      logger.error('Collaboration execution failed', error);
       res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
     }
   });
 
   app.get('/api/health', (_req, res) => {
-    res.json({
-      status:    'healthy',
-      timestamp: new Date(),
-      version:   process.env.npm_package_version || '1.0.0',
-      uptime:    process.uptime()
-    });
+    res.json({ status: 'healthy', timestamp: new Date(), uptime: process.uptime() });
   });
 
+  // Start server 
   httpServer.listen(port, '0.0.0.0', () => {
-    logger.info(`Orchestrator API listening on port ${port} on 0.0.0.0`);
+    logger.info(`Orchestrator API listening on port ${port}`);
   });
 
-  process.on('SIGTERM', async () => {
-    logger.info('SIGTERM received, shutting down gracefully');
+
+  // Graceful shutdown 
+  const shutdown = async (signal: string) => {
+    logger.info(`${signal} received — shutting down gracefully`);
+    taskOrchestrator.stopTaskProcessor();           // ← stop interval FIRST
     const agents = agentRegistry.getAllAgents();
     for (const agent of agents) await agent.shutdown();
     await communicationHub.shutdown();
     await db.close();
-    httpServer.close();
-    process.exit(0);
-  });
+    httpServer.close(() => {
+      logger.info('HTTP server closed');
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(1), 10_000);     // force exit after 10s
+  };
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT',  () => shutdown('SIGINT'));
 }
 
 main().catch(error => {

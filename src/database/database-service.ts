@@ -7,6 +7,9 @@ import { Organization } from './entities/Organization';
 import { Role } from './entities/Role';
 import { Agent } from './entities/Agent';
 import { SYSTEM_ROLES } from '../services/auth-service';
+import * as fs from 'fs';
+import * as yaml from 'js-yaml';
+import path from 'path';
 
 export class DatabaseService {
   private static instance: DatabaseService;
@@ -149,52 +152,10 @@ export class DatabaseService {
   }
 
   private async loadAgentConfigs(): Promise<any[]> {
-    // This would normally load from the agents.yaml file
-    // For now, return a minimal set
-    return [
-      {
-        id: 'claude-001',
-        name: 'Claude Code Agent',
-        type: 'cli',
-        provider: 'anthropic',
-        version: '3.0',
-        endpoint: 'http://claude-agent:5001',
-        maxConcurrentTasks: 5,
-        timeout: 300000,
-        capabilities: [
-          {
-            name: 'complex-reasoning',
-            description: 'Advanced reasoning and problem-solving',
-            category: 'planning',
-            complexity: 'complex'
-          },
-          {
-            name: 'code-generation',
-            description: 'Generate high-quality code',
-            category: 'development',
-            complexity: 'complex'
-          }
-        ]
-      },
-      {
-        id: 'gemini-001',
-        name: 'Google Gemini Agent',
-        type: 'cli',
-        provider: 'google',
-        version: '1.0',
-        endpoint: 'http://gemini-agent:5002',
-        maxConcurrentTasks: 10,
-        timeout: 180000,
-        capabilities: [
-          {
-            name: 'strategic-planning',
-            description: 'Long-term strategic planning',
-            category: 'planning',
-            complexity: 'complex'
-          }
-        ]
-      }
-    ];
+    const configPath = path.join(__dirname, '../../config/agents.yaml');
+    const configFile = fs.readFileSync(configPath, 'utf8');
+    const config = yaml.load(configFile) as { agents: any[] };
+    return config.agents;
   }
 
   public getDataSource(): DataSource {

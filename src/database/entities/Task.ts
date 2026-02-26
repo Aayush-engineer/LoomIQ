@@ -17,10 +17,10 @@ export class Task {
   id: string;
 
   @Column({ type: 'uuid' })
-  organizationId: string;
+  organizationId: string | null;
 
   @Column({ type: 'uuid', nullable: true })
-  projectId: string;
+  projectId: string | null;
 
   @Column({ type: 'uuid', nullable: true })
   parentTaskId: string;

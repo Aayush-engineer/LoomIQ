@@ -1,6 +1,7 @@
 export interface Task {
   id: string;
-  projectId: string;
+  organizationId: string | null;
+  projectId: string | null;
   type: 'requirement' | 'design' | 'implementation' | 'test' | 'deployment' | 'review';
   title: string;
   description: string;
