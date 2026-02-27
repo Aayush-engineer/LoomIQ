@@ -241,7 +241,7 @@ export function createAuthRoutes(authService: AuthService): Router {
           });
         }
 
-        const role = authService.createRole(name, description, permissions);
+        const role = await authService.createRole({ name, description, permissions });
         res.json({ role });
       } catch (error: any) {
         res.status(400).json({ error: error.message });
