@@ -284,4 +284,52 @@ export class AuthService extends EventEmitter {
     const { passwordHash, ...safe } = user;
     return safe;
   }
+
+  async updateUserRoles(userId: string, roles: string[]): Promise<any> {
+    const user = await this.db.users.findById(userId);
+    if (!user) throw new Error('User not found');
+    return this.db.users.update(userId, { roles } as any);
+  }
+
+  async resetPassword(userId: string, newPassword: string): Promise<void> {
+    const hashed = await bcrypt.hash(newPassword, 12);
+    await this.db.users.update(userId, { passwordHash: hashed } as any);
+  }
+
+  async getAllRoles(): Promise<any[]> {
+    const { Role } = await import('../database/entities/Role');
+    const repo = this.db.getRepository(Role);
+    return repo.find();
+  }
+
+  async createRole(data: { name: string; description: string; permissions: string[] }): Promise<any> {
+    const { Role } = await import('../database/entities/Role');
+    const repo = this.db.getRepository(Role);
+    return repo.save(data);
+  }
+
+  async updateRole(roleId: string, data: Partial<{ name: string; permissions: string[] }>): Promise<any> {
+    const { Role } = await import('../database/entities/Role');
+    const repo = this.db.getRepository(Role);
+    await repo.update(roleId, data as any);
+    return repo.findOne({ where: { id: roleId } });
+  }
+
+  async deleteRole(roleId: string): Promise<void> {
+    const { Role } = await import('../database/entities/Role');
+    const repo = this.db.getRepository(Role);
+    await repo.delete(roleId);
+  }
+
+  async getAllPermissions(): Promise<string[]> {
+    return [
+      'tasks:read', 'tasks:write', 'tasks:delete',
+      'projects:read', 'projects:write', 'projects:delete',
+      'agents:read', 'agents:write',
+      'analytics:read',
+      'knowledge:read', 'knowledge:write',
+      'admin:users', 'admin:roles', 'admin:system',
+    ];
+  }
 }
+
