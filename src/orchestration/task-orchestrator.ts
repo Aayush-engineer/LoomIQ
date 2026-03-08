@@ -57,15 +57,7 @@ export class TaskOrchestrator extends EventEmitter {
   
   private setupCollaborationHandlers(): void {
     this.collaborationManager.on('session:completed', async (session) => {
-      const task = await this.db.tasks.findById(session.taskId);
-      if (task && session.results.length > 0) {
-        await this.db.tasks.updateTaskStatus(session.taskId, 'completed', {
-          output: session.results,
-          completedAt: new Date(),
-        });
-        const updated = await this.db.tasks.findById(session.taskId);
-        this.emit('task:completed', { task: updated, collaboration: true });
-      }
+      this.logger.info(`Session ${session.id} completed — output handled by executeTaskWithCollaboration`);
     });
 
     this.collaborationManager.on('session:failed', async ({ session, error }) => {
@@ -396,20 +388,36 @@ export class TaskOrchestrator extends EventEmitter {
     return { type: 'sequential', config: {} };
   }
 
-  private synthesizeCollaborationResults(results: any[]): any {
-    return {
-      summary: 'Task completed through multi-agent collaboration',
-      results,
-      combinedOutput: results.reduce((acc, r) => {
-        if (r.output && typeof r.output === 'object') Object.assign(acc, r.output);
-        return acc;
-      }, {} as any),
-      metadata: {
-        agentCount: new Set(results.map(r => r.agentId)).size,
-        totalDuration: results.reduce((sum, r) => sum + (r.duration || 0), 0),
-        timestamp: new Date(),
-      },
+  
+  private synthesizeCollaborationResults(results: any[]): string {
+    if (!results || results.length === 0) return '';
+
+    // Extract plain text from any agent response shape
+    const extractText = (output: any): string => {
+      if (!output) return '';
+      if (typeof output === 'string') return output;
+      if (typeof output?.content === 'string') return output.content;  // ← your agents use this
+      if (typeof output?.text === 'string') return output.text;
+      if (typeof output?.result === 'string') return output.result;
+      return JSON.stringify(output, null, 2);
     };
+
+    // Find Implementation step by name first — that's the real answer
+    const implStep = results.find(r =>
+      r.stepId &&
+      (extractText(r.output).toLowerCase().includes('```python') ||
+      extractText(r.output).toLowerCase().includes('from flask') ||
+      extractText(r.output).toLowerCase().includes('def ') ||
+      extractText(r.output).toLowerCase().includes('class '))
+    );
+
+    // Fallback: pick the longest content (skip last step which is often just tests)
+    const middleResults = results.length > 2 ? results.slice(1, -1) : results;
+    const richest = middleResults.reduce((best, current) =>
+      extractText(current.output).length > extractText(best.output).length ? current : best
+    , middleResults[0]);
+
+    return extractText(implStep?.output ?? richest?.output ?? results[results.length - 1]?.output);
   }
 
   private generateTaskTitle(prompt: string): string {

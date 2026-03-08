@@ -34,6 +34,15 @@ const CreateTaskSchema = z.object({
   useCollaboration: z.boolean().optional().default(false),
 });
 
+const taskRateLimit = rateLimit({
+  windowMs: 60_000,
+  max: 20,
+  message: { error: 'Too many requests — max 20 per minute' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.path.endsWith('/stream'), // skip SSE route
+});
+
 async function main() {
   logger.info('Starting LoomIQ system');
 
@@ -152,9 +161,19 @@ async function main() {
       };
       const onCompleted = ({ task, collaboration }: any) => {
         if (task.id !== taskId) return;
+
+        const raw = task.output;
+        const finalOutput =
+          typeof raw === 'string' ? raw :
+          typeof raw?.content === 'string' ? raw.content :
+          typeof raw?.output === 'string' ? raw.output :
+          raw ? JSON.stringify(raw, null, 2) : '';
+
         send('task:completed', {
           message: collaboration ? 'Multi-agent collaboration completed ✓' : 'Task completed successfully ✓',
-          duration: task.actualDuration, timestamp: new Date(),
+          output: finalOutput,
+          duration: task.actualDuration,
+          timestamp: new Date(),
         });
         cleanup();
       };
@@ -205,16 +224,7 @@ async function main() {
       req.on('close', cleanup);
     });
 
-  app.use('/api/tasks', (req, res, next) => {
-    if (req.path.endsWith('/stream')) return next();
-    return rateLimit({
-      windowMs: 60_000,
-      max: 20,
-      message: { error: 'Too many requests — max 20 per minute' },
-      standardHeaders: true,
-      legacyHeaders: false,
-    })(req, res, next);
-  });
+  app.use('/api/tasks', taskRateLimit);
 
 
   // Auth routes (public) 
@@ -248,7 +258,29 @@ async function main() {
     try {
       const task = await taskOrchestrator.getTask(req.params.taskId);
       if (!task) return res.status(404).json({ error: 'Task not found' });
-      res.json({ task });
+
+      if ((req as any).user?.organizationId && 
+          (task as any).organizationId !== (req as any).user?.organizationId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      const raw = (task as any).output;
+      const extractFinalOutput = (o: any): string => {
+        if (!o) return '';
+        if (typeof o === 'string') return o;
+        if (typeof o?.output === 'string') return o.output;      // synthesized shape
+        if (typeof o?.content === 'string') return o.content;    // agent shape
+        if (Array.isArray(o?.results)) {                         // old shape
+          const best = o.results.reduce((a: any, b: any) =>
+            (b.output?.content || b.output || '').length >
+            (a.output?.content || a.output || '').length ? b : a
+          , o.results[0]);
+          return best?.output?.content ?? best?.output ?? '';
+        }
+        return JSON.stringify(o, null, 2);
+      };
+
+      res.json({ task: { ...task, output: extractFinalOutput(raw) } });
     } catch (error) {
       res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
     }
